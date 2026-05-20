@@ -11,6 +11,7 @@ const WIDTH = 1920;
 const HEIGHT = 1080;
 const FPS = 30;
 const MAX_VIDEOS = 16;
+const FONT_FILE = "C\\:/Windows/Fonts/arial.ttf";
 
 function getGrid(count) {
   if (count <= 1) return { cols: 1, rows: 1 };
@@ -27,12 +28,142 @@ function assertFfmpegAvailable() {
   });
 
   if (result.error || result.status !== 0) {
-    throw new Error("FFmpeg não encontrado no PATH");
+    throw new Error("FFmpeg nao encontrado no PATH");
   }
 }
 
-function absFile(workdir, track) {
-  return resolveWorkdirRelative(workdir, track.file);
+function absFile(workdir, segment) {
+  return resolveWorkdirRelative(workdir, segment.file);
+}
+
+function toSegment(track) {
+  return {
+    file: track.file,
+    fileName: track.fileName,
+    trackId: track.trackId,
+    offsetMs: track.offsetMs,
+    durationMs: track.durationMs,
+    startedAtNs: track.startedAtNs,
+    endedAtNs: track.endedAtNs,
+  };
+}
+
+function buildParticipantsFromTracks(tracks) {
+  const byIdentity = new Map();
+
+  for (const track of tracks || []) {
+    const isCamera = track.kind === "video" && track.source === "camera";
+    const isMicrophone = track.kind === "audio" && track.source === "microphone";
+    const isScreenShare = track.kind === "video" && track.source === "screen_share";
+
+    if (!isCamera && !isMicrophone && !isScreenShare) {
+      continue;
+    }
+
+    if (!byIdentity.has(track.participantIdentity)) {
+      byIdentity.set(track.participantIdentity, {
+        participantIdentity: track.participantIdentity,
+        name: track.participantIdentity,
+        videoSegments: [],
+        audioSegments: [],
+        screenShareSegments: [],
+      });
+    }
+
+    const participant = byIdentity.get(track.participantIdentity);
+
+    if (isCamera) {
+      participant.videoSegments.push(toSegment(track));
+    } else if (isMicrophone) {
+      participant.audioSegments.push(toSegment(track));
+    } else {
+      participant.screenShareSegments.push(toSegment(track));
+    }
+  }
+
+  const participants = Array.from(byIdentity.values()).map((participant) => ({
+    ...participant,
+    videoSegments: participant.videoSegments.sort((a, b) => a.offsetMs - b.offsetMs),
+    audioSegments: participant.audioSegments.sort((a, b) => a.offsetMs - b.offsetMs),
+    screenShareSegments: participant.screenShareSegments.sort(
+      (a, b) => a.offsetMs - b.offsetMs
+    ),
+  }));
+
+  participants.sort((a, b) => {
+    const firstA = Math.min(
+      ...[
+        ...a.videoSegments,
+        ...a.audioSegments,
+        ...a.screenShareSegments,
+      ].map((segment) => segment.offsetMs)
+    );
+    const firstB = Math.min(
+      ...[
+        ...b.videoSegments,
+        ...b.audioSegments,
+        ...b.screenShareSegments,
+      ].map((segment) => segment.offsetMs)
+    );
+
+    if (firstA !== firstB) return firstA - firstB;
+    return a.participantIdentity.localeCompare(b.participantIdentity);
+  });
+
+  return participants;
+}
+
+function getManifestParticipants(manifest) {
+  if (Array.isArray(manifest.participants)) {
+    return manifest.participants.map((participant) => ({
+      participantIdentity: participant.participantIdentity,
+      name: participant.name || participant.participantIdentity,
+      videoSegments: [...(participant.videoSegments || [])].sort(
+        (a, b) => a.offsetMs - b.offsetMs
+      ),
+      audioSegments: [...(participant.audioSegments || [])].sort(
+        (a, b) => a.offsetMs - b.offsetMs
+      ),
+      screenShareSegments: [...(participant.screenShareSegments || [])].sort(
+        (a, b) => a.offsetMs - b.offsetMs
+      ),
+    }));
+  }
+
+  return buildParticipantsFromTracks(manifest.tracks);
+}
+
+function displayName(name) {
+  const value = String(name || "unknown");
+  return value.length > 34 ? `${value.slice(0, 31)}...` : value;
+}
+
+function participantColor(identity) {
+  const palette = [
+    "1f4e5f",
+    "2f4858",
+    "3d405b",
+    "31572c",
+    "5a3e36",
+    "4c3a70",
+    "26547c",
+    "6d597a",
+  ];
+  const value = String(identity || "unknown");
+  let hash = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+
+  return palette[hash % palette.length];
+}
+
+function escapeDrawtext(value) {
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'");
 }
 
 function main(workdir) {
@@ -40,35 +171,54 @@ function main(workdir) {
   const finalOutput = getFinalGridPath(workdir);
 
   if (!fs.existsSync(manifestPath)) {
-    throw new Error("manifest.json não encontrado, rode generate-manifest primeiro");
+    throw new Error("manifest.json nao encontrado, rode generate-manifest primeiro");
   }
 
   assertFfmpegAvailable();
 
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const manifestParticipants = getManifestParticipants(manifest);
 
-  const cameraTracks = manifest.tracks
-    .filter((track) => track.kind === "video" && track.source === "camera")
+  const videoParticipants = manifestParticipants
+    .filter((participant) => participant.videoSegments.length > 0)
     .slice(0, MAX_VIDEOS);
 
-  const audioTracks = manifest.tracks
-    .filter((track) => track.kind === "audio" && track.source === "microphone");
+  const videoSegments = [];
+  videoParticipants.forEach((participant, participantIndex) => {
+    for (const segment of participant.videoSegments) {
+      videoSegments.push({
+        ...segment,
+        participantIndex,
+      });
+    }
+  });
 
-  if (cameraTracks.length === 0) {
-    throw new Error("Nenhuma câmera encontrada no manifest.");
+  const audioSegments = manifestParticipants.flatMap(
+    (participant) => participant.audioSegments || []
+  );
+  const screenShareSegments = manifestParticipants
+    .flatMap((participant) => participant.screenShareSegments || [])
+    .sort((a, b) => a.offsetMs - b.offsetMs);
+
+  if (videoSegments.length === 0 && screenShareSegments.length === 0) {
+    throw new Error("Nenhum video encontrado no manifest.");
   }
 
   const inputs = [];
 
-  for (const track of cameraTracks) {
-    inputs.push("-i", absFile(workdir, track));
+  for (const segment of videoSegments) {
+    inputs.push("-i", absFile(workdir, segment));
   }
 
-  for (const track of audioTracks) {
-    inputs.push("-i", absFile(workdir, track));
+  for (const segment of screenShareSegments) {
+    inputs.push("-i", absFile(workdir, segment));
   }
 
-  const { cols, rows } = getGrid(cameraTracks.length);
+  for (const segment of audioSegments) {
+    inputs.push("-i", absFile(workdir, segment));
+  }
+
+  const { cols, rows } = getGrid(Math.max(1, videoParticipants.length));
 
   const cellW = Math.floor(WIDTH / cols);
   const cellH = Math.floor(HEIGHT / rows);
@@ -79,40 +229,127 @@ function main(workdir) {
     `color=c=black:s=${WIDTH}x${HEIGHT}:r=${FPS}:d=${manifest.durationMs / 1000}[base]`
   );
 
-  let currentVideoBase = "base";
-
-  cameraTracks.forEach((track, index) => {
-    const delaySec = track.offsetMs / 1000;
-    const scaled = `v${index}`;
-    const out = index === cameraTracks.length - 1 ? "vout" : `tmpv${index}`;
-
+  const participantTiles = [];
+  videoParticipants.forEach((participant, index) => {
     const col = index % cols;
     const row = Math.floor(index / cols);
+    participantTiles.push({
+      identity: participant.participantIdentity,
+      name: participant.name || participant.participantIdentity,
+      x: col * cellW,
+      y: row * cellH,
+    });
+  });
+
+  let currentVideoBase = "base";
+
+  participantTiles.forEach((tile, index) => {
+    const out = `tmptile${index}`;
+
+    filters.push(
+      `[${currentVideoBase}]` +
+        `drawbox=x=${tile.x}:y=${tile.y}:w=${cellW}:h=${cellH}:color=0x${participantColor(
+          tile.identity
+        )}@1:t=fill` +
+        `[${out}]`
+    );
+
+    currentVideoBase = out;
+  });
+
+  videoSegments.forEach((segment, index) => {
+    const delaySec = segment.offsetMs / 1000;
+    const endSec = (segment.offsetMs + segment.durationMs) / 1000;
+    const scaled = `v${index}`;
+    const isLastVideo = index === videoSegments.length - 1;
+    const out =
+      isLastVideo && screenShareSegments.length === 0 ? "vout" : `tmpv${index}`;
+
+    const col = segment.participantIndex % cols;
+    const row = Math.floor(segment.participantIndex / cols);
     const x = col * cellW;
     const y = row * cellH;
 
     filters.push(
       `[${index}:v]` +
         `setpts=PTS-STARTPTS+${delaySec}/TB,` +
-        `scale=${cellW}:${cellH}:force_original_aspect_ratio=increase,` +
-        `crop=${cellW}:${cellH},` +
-        `setsar=1` +
+        `scale=${cellW}:${cellH}:force_original_aspect_ratio=decrease,` +
+        `setsar=1,` +
+        `pad=${cellW}:${cellH}:(ow-iw)/2:(oh-ih)/2:color=black` +
         `[${scaled}]`
     );
 
     filters.push(
-      `[${currentVideoBase}][${scaled}]overlay=x=${x}:y=${y}:eof_action=pass[${out}]`
+      `[${currentVideoBase}][${scaled}]` +
+        `overlay=x=${x}:y=${y}:eof_action=pass:enable='between(t,${delaySec},${endSec})'` +
+        `[${out}]`
     );
 
     currentVideoBase = out;
   });
 
-  const audioLabels = [];
-  const audioInputStart = cameraTracks.length;
+  participantTiles.forEach((tile, index) => {
+    const out =
+      index === participantTiles.length - 1 && screenShareSegments.length === 0
+        ? "vout"
+        : `tmpname${index}`;
+    const escapedName = escapeDrawtext(displayName(tile.name));
 
-  audioTracks.forEach((track, index) => {
+    filters.push(
+      `[${currentVideoBase}]` +
+        `drawbox=x=${tile.x}:y=${tile.y + cellH - 56}:w=${cellW}:h=56:color=black@0.55:t=fill,` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapedName}':x=${tile.x + 24}:y=${tile.y + cellH - 40}:fontsize=28:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1` +
+        `[${out}]`
+    );
+
+    currentVideoBase = out;
+  });
+
+  let currentOutputBase = currentVideoBase;
+  const screenShareInputStart = videoSegments.length;
+
+  screenShareSegments.forEach((segment, index) => {
+    const inputIndex = screenShareInputStart + index;
+    const delaySec = segment.offsetMs / 1000;
+    const endSec = (segment.offsetMs + segment.durationMs) / 1000;
+    const fitted = `ss${index}`;
+    const padded = `ssp${index}`;
+    const out =
+      index === screenShareSegments.length - 1 ? "vout" : `tmpss${index}`;
+
+    filters.push(
+      `[${inputIndex}:v]` +
+        `setpts=PTS-STARTPTS+${delaySec}/TB,` +
+        `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,` +
+        `setsar=1` +
+        `[${fitted}]`
+    );
+
+    filters.push(
+      `[${fitted}]` +
+        `pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black` +
+        `[${padded}]`
+    );
+
+    filters.push(
+      `[${currentOutputBase}][${padded}]` +
+        `overlay=x=0:y=0:eof_action=pass:enable='between(t,${delaySec},${endSec})'` +
+        `[${out}]`
+    );
+
+    currentOutputBase = out;
+  });
+
+  if (screenShareSegments.length === 0 && currentOutputBase !== "vout") {
+    filters.push(`[${currentOutputBase}]copy[vout]`);
+  }
+
+  const audioLabels = [];
+  const audioInputStart = videoSegments.length + screenShareSegments.length;
+
+  audioSegments.forEach((segment, index) => {
     const inputIndex = audioInputStart + index;
-    const delayMs = Math.max(0, Math.round(track.offsetMs));
+    const delayMs = Math.max(0, Math.round(segment.offsetMs));
     const label = `a${index}`;
 
     filters.push(
@@ -144,7 +381,6 @@ function main(workdir) {
         `[aout]`
     );
 
-    // Recria args porque adicionamos filtro de áudio depois.
     args.length = 0;
 
     args.push(
@@ -179,7 +415,7 @@ function main(workdir) {
     finalOutput
   );
 
-  console.log("Gerando vídeo...");
+  console.log("Gerando video...");
   console.log("");
   console.log("ffmpeg " + args.join(" "));
   console.log("");
@@ -193,7 +429,7 @@ function main(workdir) {
   }
 
   console.log("");
-  console.log("Vídeo gerado:");
+  console.log("Video gerado:");
   console.log(finalOutput);
 }
 

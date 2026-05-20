@@ -38,6 +38,29 @@ function normalizeSource(source) {
   return value;
 }
 
+function isAudioExt(fileBaseName) {
+  const ext = path.extname(fileBaseName).toLowerCase();
+  return [".ogg", ".opus", ".m4a", ".aac", ".mp3", ".wav"].includes(ext);
+}
+
+function inferSource(source, trackId, fileBaseName) {
+  const normalized = normalizeSource(source);
+
+  if (normalized && normalized !== "unknown") {
+    return normalized;
+  }
+
+  const track = String(trackId || "").toUpperCase();
+  const ext = path.extname(fileBaseName).toLowerCase();
+
+  if (track.startsWith("TR_VC")) return "camera";
+  if (track.startsWith("TR_AM")) return "microphone";
+  if (ext === ".webm") return "camera";
+  if (isAudioExt(fileBaseName)) return "microphone";
+
+  return normalized || "unknown";
+}
+
 function inferFromFilename(fileBaseName, trackId) {
   const withoutExt = fileBaseName.replace(/\.[^.]+$/, "");
 
@@ -47,6 +70,15 @@ function inferFromFilename(fileBaseName, trackId) {
   const beforeTrack =
     trackIndex >= 0 ? withoutExt.slice(0, trackIndex) : withoutExt;
 
+  const screenShareSuffix = "-screen-share";
+  if (beforeTrack.endsWith(screenShareSuffix)) {
+    return {
+      participantIdentity:
+        beforeTrack.slice(0, -screenShareSuffix.length) || "unknown",
+      source: "screen_share",
+    };
+  }
+
   const parts = beforeTrack.split("-");
 
   const rawSource = parts.pop() || "unknown";
@@ -54,22 +86,97 @@ function inferFromFilename(fileBaseName, trackId) {
 
   return {
     participantIdentity,
-    source: normalizeSource(rawSource),
+    source: inferSource(rawSource, trackId, fileBaseName),
   };
 }
 
 function inferKind(source, fileBaseName) {
-  const ext = path.extname(fileBaseName).toLowerCase();
-
   if (source === "microphone" || source === "screen_share_audio") {
     return "audio";
   }
 
-  if ([".ogg", ".opus", ".m4a", ".aac", ".mp3", ".wav"].includes(ext)) {
+  if (isAudioExt(fileBaseName)) {
     return "audio";
   }
 
   return "video";
+}
+
+function toSegment(track) {
+  return {
+    file: track.file,
+    fileName: track.fileName,
+    trackId: track.trackId,
+    offsetMs: track.offsetMs,
+    durationMs: track.durationMs,
+    startedAtNs: track.startedAtNs,
+    endedAtNs: track.endedAtNs,
+  };
+}
+
+function buildParticipants(tracks) {
+  const byIdentity = new Map();
+
+  for (const track of tracks) {
+    const isCamera = track.kind === "video" && track.source === "camera";
+    const isMicrophone = track.kind === "audio" && track.source === "microphone";
+    const isScreenShare = track.kind === "video" && track.source === "screen_share";
+
+    if (!isCamera && !isMicrophone && !isScreenShare) {
+      continue;
+    }
+
+    if (!byIdentity.has(track.participantIdentity)) {
+      byIdentity.set(track.participantIdentity, {
+        participantIdentity: track.participantIdentity,
+        name: track.participantIdentity,
+        videoSegments: [],
+        audioSegments: [],
+        screenShareSegments: [],
+      });
+    }
+
+    const participant = byIdentity.get(track.participantIdentity);
+
+    if (isCamera) {
+      participant.videoSegments.push(toSegment(track));
+    } else if (isMicrophone) {
+      participant.audioSegments.push(toSegment(track));
+    } else {
+      participant.screenShareSegments.push(toSegment(track));
+    }
+  }
+
+  const participants = Array.from(byIdentity.values()).map((participant) => ({
+    ...participant,
+    videoSegments: participant.videoSegments.sort((a, b) => a.offsetMs - b.offsetMs),
+    audioSegments: participant.audioSegments.sort((a, b) => a.offsetMs - b.offsetMs),
+    screenShareSegments: participant.screenShareSegments.sort(
+      (a, b) => a.offsetMs - b.offsetMs
+    ),
+  }));
+
+  participants.sort((a, b) => {
+    const firstA = Math.min(
+      ...[
+        ...a.videoSegments,
+        ...a.audioSegments,
+        ...a.screenShareSegments,
+      ].map((segment) => segment.offsetMs)
+    );
+    const firstB = Math.min(
+      ...[
+        ...b.videoSegments,
+        ...b.audioSegments,
+        ...b.screenShareSegments,
+      ].map((segment) => segment.offsetMs)
+    );
+
+    if (firstA !== firstB) return firstA - firstB;
+    return a.participantIdentity.localeCompare(b.participantIdentity);
+  });
+
+  return participants;
 }
 
 function nsToMs(ns) {
@@ -195,6 +302,7 @@ function main(workdir) {
     recordingEndNs: String(recordingEndNs),
     durationMs: nsToMs(recordingEndNs - recordingStartNs),
     tracks,
+    participants: buildParticipants(tracks),
   };
 
   ensureDir(getOutputDir(workdir));
@@ -209,6 +317,7 @@ function main(workdir) {
   console.log(`Câmeras: ${tracks.filter((t) => t.source === "camera").length}`);
   console.log(`Microfones: ${tracks.filter((t) => t.source === "microphone").length}`);
   console.log(`Screen shares: ${tracks.filter((t) => t.source === "screen_share").length}`);
+  console.log(`Participantes: ${manifest.participants.length}`);
 }
 
 runCli(main, "generate-manifest.js");
