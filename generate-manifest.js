@@ -295,12 +295,22 @@ function main(workdir) {
     return a.participantIdentity.localeCompare(b.participantIdentity);
   });
 
+  const firstTrack = tracks[0] || {};
+
   const manifest = {
     version: 1,
     generatedAt: new Date().toISOString(),
     recordingStartNs: String(recordingStartNs),
     recordingEndNs: String(recordingEndNs),
     durationMs: nsToMs(recordingEndNs - recordingStartNs),
+    call: {
+      roomId: firstTrack.roomId || "",
+      roomName: firstTrack.roomName || "",
+      title: firstTrack.roomName || "Untitled meeting",
+      description: "",
+      recorderBy: "unknown",
+      organizedBy: "unknown",
+    },
     tracks,
     participants: buildParticipants(tracks),
   };

@@ -12,6 +12,7 @@ const HEIGHT = 1080;
 const FPS = 30;
 const MAX_VIDEOS = 16;
 const FONT_FILE = "C\\:/Windows/Fonts/arial.ttf";
+const INTRO_SECONDS = 2;
 
 function getGrid(count) {
   if (count <= 1) return { cols: 1, rows: 1 };
@@ -166,6 +167,140 @@ function escapeDrawtext(value) {
     .replace(/'/g, "\\'");
 }
 
+function truncate(value, maxLength) {
+  const text = String(value || "");
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+function splitTitle(title) {
+  const text = String(title || "Untitled meeting").trim();
+  const maxLineLength = 48;
+  const words = text.split(/\s+/);
+  const lines = [];
+  let current = "";
+
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+
+    if (next.length <= maxLineLength || current.length === 0) {
+      current = next;
+      continue;
+    }
+
+    lines.push(current);
+    current = word;
+
+    if (lines.length === 1) {
+      break;
+    }
+  }
+
+  if (current && lines.length < 2) {
+    lines.push(current);
+  }
+
+  return lines.length > 0
+    ? lines.map((line) => truncate(line, 58))
+    : ["Untitled meeting"];
+}
+
+function formatUtcFromNs(ns) {
+  if (!ns) return "";
+
+  const millis = Number(BigInt(ns) / 1_000_000n);
+  const date = new Date(millis);
+
+  if (Number.isNaN(date.getTime())) return "";
+
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const hour = String(date.getUTCHours()).padStart(2, "0");
+  const minute = String(date.getUTCMinutes()).padStart(2, "0");
+
+  return `${year}-${month}-${day} ${hour}:${minute} UTC`;
+}
+
+function getCallMetadata(manifest) {
+  const call = manifest.call || {};
+  const firstTrack = Array.isArray(manifest.tracks) ? manifest.tracks[0] || {} : {};
+
+  return {
+    title: call.title || firstTrack.roomName || "Untitled meeting",
+    description: call.description || "",
+    recorderBy: call.recorderBy || call.recordedBy || "unknown",
+    organizedBy: call.organizedBy || call.OrganizedBy || "unknown",
+    startedAt: formatUtcFromNs(manifest.recordingStartNs),
+  };
+}
+
+function addIntroFilters(filters, manifest, baseLabel) {
+  const metadata = getCallMetadata(manifest);
+  const titleLines = splitTitle(metadata.title);
+  const titleY = titleLines.length > 1 ? 282 : 326;
+  let current = "introbg";
+
+  filters.push(
+    `color=c=0x2f2d38:s=${WIDTH}x${HEIGHT}:r=${FPS}:d=${INTRO_SECONDS}[introbg]`
+  );
+
+  filters.push(
+    `[${current}]` +
+      `drawtext=fontfile='${FONT_FILE}':text='Ellevo Connect':x=${WIDTH}-420:y=86:fontsize=30:fontcolor=white@0.9` +
+      `[introbrand]`
+  );
+  current = "introbrand";
+
+  titleLines.forEach((line, index) => {
+    const out = `introtitle${index}`;
+    filters.push(
+      `[${current}]` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+          line
+        )}':x=130:y=${titleY + index * 76}:fontsize=62:fontcolor=white` +
+        `[${out}]`
+    );
+    current = out;
+  });
+
+  if (metadata.startedAt) {
+    filters.push(
+      `[${current}]` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+          metadata.startedAt
+        )}':x=132:y=${titleY + titleLines.length * 76 + 2}:fontsize=28:fontcolor=white@0.86` +
+        `[introdate]`
+    );
+    current = "introdate";
+  }
+
+  if (metadata.description) {
+    filters.push(
+      `[${current}]` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+          truncate(metadata.description, 92)
+        )}':x=132:y=${titleY + titleLines.length * 76 + 48}:fontsize=24:fontcolor=white@0.72` +
+        `[introdesc]`
+    );
+    current = "introdesc";
+  }
+
+  filters.push(
+    `[${current}]` +
+      `drawtext=fontfile='${FONT_FILE}':text='Recorded by':x=132:y=760:fontsize=15:fontcolor=white@0.55,` +
+      `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+        truncate(metadata.recorderBy, 38)
+      )}':x=132:y=788:fontsize=27:fontcolor=white@0.92,` +
+      `drawtext=fontfile='${FONT_FILE}':text='Organized by':x=520:y=760:fontsize=15:fontcolor=white@0.55,` +
+      `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+        truncate(metadata.organizedBy, 38)
+      )}':x=520:y=788:fontsize=27:fontcolor=white@0.92` +
+      `[intro]`
+  );
+
+  filters.push(`[${baseLabel}][intro]overlay=x=0:y=0:eof_action=pass[vout]`);
+}
+
 function main(workdir) {
   const manifestPath = getManifestPath(workdir);
   const finalOutput = getFinalGridPath(workdir);
@@ -224,9 +359,10 @@ function main(workdir) {
   const cellH = Math.floor(HEIGHT / rows);
 
   const filters = [];
+  const outputDurationSec = manifest.durationMs / 1000 + INTRO_SECONDS;
 
   filters.push(
-    `color=c=black:s=${WIDTH}x${HEIGHT}:r=${FPS}:d=${manifest.durationMs / 1000}[base]`
+    `color=c=black:s=${WIDTH}x${HEIGHT}:r=${FPS}:d=${outputDurationSec}[base]`
   );
 
   const participantTiles = [];
@@ -258,12 +394,10 @@ function main(workdir) {
   });
 
   videoSegments.forEach((segment, index) => {
-    const delaySec = segment.offsetMs / 1000;
-    const endSec = (segment.offsetMs + segment.durationMs) / 1000;
+    const delaySec = segment.offsetMs / 1000 + INTRO_SECONDS;
+    const endSec = (segment.offsetMs + segment.durationMs) / 1000 + INTRO_SECONDS;
     const scaled = `v${index}`;
-    const isLastVideo = index === videoSegments.length - 1;
-    const out =
-      isLastVideo && screenShareSegments.length === 0 ? "vout" : `tmpv${index}`;
+    const out = `tmpv${index}`;
 
     const col = segment.participantIndex % cols;
     const row = Math.floor(segment.participantIndex / cols);
@@ -289,10 +423,7 @@ function main(workdir) {
   });
 
   participantTiles.forEach((tile, index) => {
-    const out =
-      index === participantTiles.length - 1 && screenShareSegments.length === 0
-        ? "vout"
-        : `tmpname${index}`;
+    const out = `tmpname${index}`;
     const escapedName = escapeDrawtext(displayName(tile.name));
 
     filters.push(
@@ -310,12 +441,11 @@ function main(workdir) {
 
   screenShareSegments.forEach((segment, index) => {
     const inputIndex = screenShareInputStart + index;
-    const delaySec = segment.offsetMs / 1000;
-    const endSec = (segment.offsetMs + segment.durationMs) / 1000;
+    const delaySec = segment.offsetMs / 1000 + INTRO_SECONDS;
+    const endSec = (segment.offsetMs + segment.durationMs) / 1000 + INTRO_SECONDS;
     const fitted = `ss${index}`;
     const padded = `ssp${index}`;
-    const out =
-      index === screenShareSegments.length - 1 ? "vout" : `tmpss${index}`;
+    const out = `tmpss${index}`;
 
     filters.push(
       `[${inputIndex}:v]` +
@@ -340,16 +470,17 @@ function main(workdir) {
     currentOutputBase = out;
   });
 
-  if (screenShareSegments.length === 0 && currentOutputBase !== "vout") {
-    filters.push(`[${currentOutputBase}]copy[vout]`);
-  }
+  addIntroFilters(filters, manifest, currentOutputBase);
 
   const audioLabels = [];
   const audioInputStart = videoSegments.length + screenShareSegments.length;
 
   audioSegments.forEach((segment, index) => {
     const inputIndex = audioInputStart + index;
-    const delayMs = Math.max(0, Math.round(segment.offsetMs));
+    const delayMs = Math.max(
+      0,
+      Math.round(segment.offsetMs + INTRO_SECONDS * 1000)
+    );
     const label = `a${index}`;
 
     filters.push(
@@ -376,7 +507,7 @@ function main(workdir) {
     filters.push(
       `${audioLabels.map((label) => `[${label}]`).join("")}` +
         `amix=inputs=${audioLabels.length}:duration=longest:normalize=0,` +
-        `atrim=0:${manifest.durationMs / 1000},` +
+        `atrim=0:${outputDurationSec},` +
         `asetpts=PTS-STARTPTS` +
         `[aout]`
     );
@@ -397,7 +528,7 @@ function main(workdir) {
 
   args.push(
     "-t",
-    String(manifest.durationMs / 1000),
+    String(outputDurationSec),
     "-r",
     String(FPS),
     "-c:v",
