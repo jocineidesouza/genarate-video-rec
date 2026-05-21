@@ -1,9 +1,12 @@
 const fs = require("fs");
+const path = require("path");
 const { spawnSync } = require("child_process");
 const { runCli } = require("./src/cli");
 const {
+  ensureDir,
   getFinalGridPath,
   getManifestPath,
+  getOutputDir,
   resolveWorkdirRelative,
 } = require("./src/paths");
 
@@ -16,6 +19,12 @@ const INTRO_SECONDS = 2;
 const VIDEO_PRESET = "ultrafast";
 const VIDEO_CRF = "35";
 const AUDIO_BITRATE = "64k";
+const GRID_GAP = 8;
+const TILE_BACKGROUND = "2f2d38";
+const AVATAR_BACKGROUND = "5b5a66";
+const AVATAR_CIRCLE = "\u25CF";
+const STATIC_GRID_FILE = "grid-background.png";
+const STATIC_LABELS_FILE = "grid-labels.png";
 
 function getGrid(count) {
   if (count <= 1) return { cols: 1, rows: 1 };
@@ -122,6 +131,7 @@ function getManifestParticipants(manifest) {
     return manifest.participants.map((participant) => ({
       participantIdentity: participant.participantIdentity,
       name: participant.name || participant.participantIdentity,
+      avatarFile: participant.avatarFile || "",
       videoSegments: [...(participant.videoSegments || [])].sort(
         (a, b) => a.offsetMs - b.offsetMs
       ),
@@ -142,32 +152,24 @@ function displayName(name) {
   return value.length > 34 ? `${value.slice(0, 31)}...` : value;
 }
 
-function participantColor(identity) {
-  const palette = [
-    "1f4e5f",
-    "2f4858",
-    "3d405b",
-    "31572c",
-    "5a3e36",
-    "4c3a70",
-    "26547c",
-    "6d597a",
-  ];
-  const value = String(identity || "unknown");
-  let hash = 0;
-
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
-  }
-
-  return palette[hash % palette.length];
-}
-
 function escapeDrawtext(value) {
   return String(value)
     .replace(/\\/g, "\\\\")
     .replace(/:/g, "\\:")
     .replace(/'/g, "\\'");
+}
+
+function initials(name) {
+  const value = String(name || "unknown")
+    .replace(/[_-]+/g, " ")
+    .trim();
+  const words = value.split(/\s+/).filter(Boolean);
+
+  if (words.length >= 2) {
+    return `${words[0][0]}${words[1][0]}`.toUpperCase();
+  }
+
+  return value.slice(0, 2).toUpperCase() || "?";
 }
 
 function truncate(value, maxLength) {
@@ -323,15 +325,148 @@ function addIntroFilters(filters, manifest, baseLabel) {
   filters.push(`[${baseLabel}][intro]overlay=x=0:y=0:eof_action=pass[vout]`);
 }
 
+function runFfmpeg(args) {
+  const result = spawnSync("ffmpeg", args, {
+    stdio: "inherit",
+  });
+
+  if (result.status !== 0) {
+    process.exit(result.status || 1);
+  }
+}
+
+function buildStaticGridAssets(workdir, participantTiles, cellW, cellH) {
+  const outputDir = getOutputDir(workdir);
+  const gridPath = path.join(outputDir, STATIC_GRID_FILE);
+  const labelsPath = path.join(outputDir, STATIC_LABELS_FILE);
+  const avatarInputs = participantTiles
+    .filter((tile) => tile.avatarFile)
+    .map((tile) => tile.avatarFile);
+
+  const backgroundFilters = [
+    `color=c=0x111111:s=${WIDTH}x${HEIGHT}:r=1:d=1[bg0]`,
+  ];
+  let currentBackground = "bg0";
+
+  participantTiles.forEach((tile, index) => {
+    const out = `bgtile${index}`;
+    const avatarSize = Math.max(40, Math.round(Math.min(cellW, cellH) * 0.34));
+    const avatarX = tile.x + Math.round((cellW - avatarSize) / 2);
+    const avatarY = tile.y + Math.round((cellH - avatarSize) / 2);
+    const initialsFont = Math.max(16, Math.round(avatarSize * 0.38));
+
+    backgroundFilters.push(
+      `[${currentBackground}]` +
+        `drawbox=x=${tile.x}:y=${tile.y}:w=${cellW}:h=${cellH}:color=0x${TILE_BACKGROUND}@1:t=fill,` +
+        `drawtext=fontfile='${FONT_FILE}':text='${AVATAR_CIRCLE}':x=${avatarX}+(${avatarSize}-text_w)/2:y=${avatarY}+(${avatarSize}-text_h)/2:fontsize=${Math.round(
+          avatarSize * 1.2
+        )}:fontcolor=0x${AVATAR_BACKGROUND},` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+          tile.initials
+        )}':x=${avatarX}+(${avatarSize}-text_w)/2:y=${avatarY}+(${avatarSize}-text_h)/2:fontsize=${initialsFont}:fontcolor=white@0.95` +
+        `[${out}]`
+    );
+
+    currentBackground = out;
+  });
+
+  participantTiles.forEach((tile, index) => {
+    if (tile.avatarInputIndex === null) {
+      return;
+    }
+
+    const avatarSize = Math.max(40, Math.round(Math.min(cellW, cellH) * 0.34));
+    const avatarX = tile.x + Math.round((cellW - avatarSize) / 2);
+    const avatarY = tile.y + Math.round((cellH - avatarSize) / 2);
+    const avatarLabel = `bgavatar${index}`;
+    const out = `bgwithavatar${index}`;
+
+    backgroundFilters.push(
+      `[${tile.avatarInputIndex}:v]` +
+        `scale=${avatarSize}:${avatarSize}:force_original_aspect_ratio=increase:force_divisible_by=2,` +
+        `crop=${avatarSize}:${avatarSize},setsar=1` +
+        `[${avatarLabel}]`
+    );
+
+    backgroundFilters.push(
+      `[${currentBackground}][${avatarLabel}]overlay=x=${avatarX}:y=${avatarY}:eof_action=pass[${out}]`
+    );
+
+    currentBackground = out;
+  });
+
+  const backgroundArgs = [
+    "-y",
+    ...avatarInputs.flatMap((avatarFile) => ["-i", avatarFile]),
+    "-filter_complex",
+    backgroundFilters.join(";"),
+    "-map",
+    `[${currentBackground}]`,
+    "-frames:v",
+    "1",
+    "-update",
+    "1",
+    gridPath,
+  ];
+
+  const labelFilters = [
+    `color=c=black@0.0:s=${WIDTH}x${HEIGHT}:r=1:d=1,format=rgba[label0]`,
+  ];
+  let currentLabel = "label0";
+
+  participantTiles.forEach((tile, index) => {
+    const out = `labeltile${index}`;
+    const escapedName = escapeDrawtext(displayName(tile.name));
+    const labelH = Math.max(20, Math.round(cellH * 0.11));
+    const labelFont = Math.max(10, Math.round(labelH * 0.48));
+
+    labelFilters.push(
+      `[${currentLabel}]` +
+        `drawbox=x=${tile.x}:y=${
+          tile.y + cellH - labelH
+        }:w=${cellW}:h=${labelH}:color=black@0.55:t=fill,` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapedName}':x=${
+          tile.x + Math.max(8, Math.round(cellW * 0.025))
+        }:y=${
+          tile.y + cellH - Math.round(labelH * 0.72)
+        }:fontsize=${labelFont}:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1` +
+        `[${out}]`
+    );
+
+    currentLabel = out;
+  });
+
+  const labelArgs = [
+    "-y",
+    "-filter_complex",
+    labelFilters.join(";"),
+    "-map",
+    `[${currentLabel}]`,
+    "-frames:v",
+    "1",
+    "-update",
+    "1",
+    labelsPath,
+  ];
+
+  console.log("Gerando imagens estaticas do grid...");
+  runFfmpeg(backgroundArgs);
+  runFfmpeg(labelArgs);
+
+  return { gridPath, labelsPath };
+}
+
 function main(workdir) {
   const manifestPath = getManifestPath(workdir);
   const finalOutput = getFinalGridPath(workdir);
+  const outputDir = getOutputDir(workdir);
 
   if (!fs.existsSync(manifestPath)) {
     throw new Error("manifest.json nao encontrado, rode generate-manifest primeiro");
   }
 
   assertFfmpegAvailable();
+  ensureDir(outputDir);
 
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   const manifestParticipants = getManifestParticipants(manifest);
@@ -366,7 +501,48 @@ function main(workdir) {
     throw new Error("Nenhum video encontrado no manifest.");
   }
 
-  const inputs = [];
+  const { cols, rows } = getGrid(Math.max(1, videoParticipants.length));
+
+  const gap = GRID_GAP;
+  const cellW = Math.floor((WIDTH - gap * (cols + 1)) / cols);
+  const cellH = Math.floor((HEIGHT - gap * (rows + 1)) / rows);
+
+  const filters = [];
+  const outputDurationSec = manifest.durationMs / 1000 + INTRO_SECONDS;
+
+  const participantTiles = [];
+  let avatarInputIndex = 0;
+  videoParticipants.forEach((participant, index) => {
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    const avatarFile = participant.avatarFile
+      ? resolveWorkdirRelative(workdir, participant.avatarFile)
+      : "";
+    const hasAvatarFile = Boolean(avatarFile && fs.existsSync(avatarFile));
+
+    participantTiles.push({
+      identity: participant.participantIdentity,
+      name: participant.name || participant.participantIdentity,
+      initials: initials(participant.name || participant.participantIdentity),
+      avatarFile: hasAvatarFile ? avatarFile : "",
+      avatarInputIndex: hasAvatarFile ? avatarInputIndex++ : null,
+      x: gap + col * (cellW + gap),
+      y: gap + row * (cellH + gap),
+    });
+  });
+
+  const staticAssets = buildStaticGridAssets(workdir, participantTiles, cellW, cellH);
+  const inputs = [
+    "-loop",
+    "1",
+    "-i",
+    staticAssets.gridPath,
+    "-loop",
+    "1",
+    "-i",
+    staticAssets.labelsPath,
+  ];
+  const videoInputStart = 2;
 
   for (const segment of videoSegments) {
     inputs.push("-i", absFile(workdir, segment));
@@ -380,61 +556,21 @@ function main(workdir) {
     inputs.push("-i", absFile(workdir, segment));
   }
 
-  const { cols, rows } = getGrid(Math.max(1, videoParticipants.length));
-
-  const cellW = Math.floor(WIDTH / cols);
-  const cellH = Math.floor(HEIGHT / rows);
-
-  const filters = [];
-  const outputDurationSec = manifest.durationMs / 1000 + INTRO_SECONDS;
-
-  filters.push(
-    `color=c=black:s=${WIDTH}x${HEIGHT}:r=${FPS}:d=${outputDurationSec}[base]`
-  );
-
-  const participantTiles = [];
-  videoParticipants.forEach((participant, index) => {
-    const col = index % cols;
-    const row = Math.floor(index / cols);
-    participantTiles.push({
-      identity: participant.participantIdentity,
-      name: participant.name || participant.participantIdentity,
-      x: col * cellW,
-      y: row * cellH,
-    });
-  });
-
   let currentVideoBase = "base";
 
-  participantTiles.forEach((tile, index) => {
-    const out = `tmptile${index}`;
-
-    filters.push(
-      `[${currentVideoBase}]` +
-        `drawbox=x=${tile.x}:y=${tile.y}:w=${cellW}:h=${cellH}:color=0x${participantColor(
-          tile.identity
-        )}@1:t=fill` +
-        `[${out}]`
-    );
-
-    currentVideoBase = out;
-  });
+  filters.push(`[0:v]fps=${FPS},scale=${WIDTH}:${HEIGHT},setsar=1[base]`);
 
   videoSegments.forEach((segment, index) => {
     const delaySec = segment.offsetMs / 1000 + INTRO_SECONDS;
     const endSec = (segment.offsetMs + segment.durationMs) / 1000 + INTRO_SECONDS;
     const scaled = `v${index}`;
     const out = `tmpv${index}`;
-
-    const col = segment.participantIndex % cols;
-    const row = Math.floor(segment.participantIndex / cols);
-    const x = col * cellW;
-    const y = row * cellH;
+    const tile = participantTiles[segment.participantIndex];
 
     filters.push(
-      `[${index}:v]` +
+      `[${videoInputStart + index}:v]` +
         `setpts=PTS-STARTPTS+${delaySec}/TB,` +
-        `scale=${cellW}:${cellH}:force_original_aspect_ratio=decrease,` +
+        `scale=${cellW}:${cellH}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
         `setsar=1,` +
         `pad=${cellW}:${cellH}:(ow-iw)/2:(oh-ih)/2:color=black` +
         `[${scaled}]`
@@ -442,37 +578,18 @@ function main(workdir) {
 
     filters.push(
       `[${currentVideoBase}][${scaled}]` +
-        `overlay=x=${x}:y=${y}:eof_action=pass:enable='between(t,${delaySec},${endSec})'` +
+        `overlay=x=${tile.x}:y=${tile.y}:eof_action=pass:enable='between(t,${delaySec},${endSec})'` +
         `[${out}]`
     );
 
     currentVideoBase = out;
   });
 
-  participantTiles.forEach((tile, index) => {
-    const out = `tmpname${index}`;
-    const escapedName = escapeDrawtext(displayName(tile.name));
-    const labelH = Math.max(20, Math.round(cellH * 0.11));
-    const labelFont = Math.max(10, Math.round(labelH * 0.48));
+  filters.push(`[1:v]fps=${FPS},format=rgba[labels]`);
+  filters.push(`[${currentVideoBase}][labels]overlay=x=0:y=0:eof_action=pass[gridwithlabels]`);
 
-    filters.push(
-      `[${currentVideoBase}]` +
-        `drawbox=x=${tile.x}:y=${
-          tile.y + cellH - labelH
-        }:w=${cellW}:h=${labelH}:color=black@0.55:t=fill,` +
-        `drawtext=fontfile='${FONT_FILE}':text='${escapedName}':x=${
-          tile.x + Math.max(8, Math.round(cellW * 0.025))
-        }:y=${
-          tile.y + cellH - Math.round(labelH * 0.72)
-        }:fontsize=${labelFont}:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1` +
-        `[${out}]`
-    );
-
-    currentVideoBase = out;
-  });
-
-  let currentOutputBase = currentVideoBase;
-  const screenShareInputStart = videoSegments.length;
+  let currentOutputBase = "gridwithlabels";
+  const screenShareInputStart = videoInputStart + videoSegments.length;
 
   screenShareSegments.forEach((segment, index) => {
     const inputIndex = screenShareInputStart + index;
@@ -485,7 +602,7 @@ function main(workdir) {
     filters.push(
       `[${inputIndex}:v]` +
         `setpts=PTS-STARTPTS+${delaySec}/TB,` +
-        `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,` +
+        `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
         `setsar=1` +
         `[${fitted}]`
     );
@@ -508,7 +625,8 @@ function main(workdir) {
   addIntroFilters(filters, manifest, currentOutputBase);
 
   const audioLabels = [];
-  const audioInputStart = videoSegments.length + screenShareSegments.length;
+  const audioInputStart =
+    videoInputStart + videoSegments.length + screenShareSegments.length;
 
   audioSegments.forEach((segment, index) => {
     const inputIndex = audioInputStart + index;
