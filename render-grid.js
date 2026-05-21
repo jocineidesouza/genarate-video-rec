@@ -337,7 +337,12 @@ function main(workdir) {
   const manifestParticipants = getManifestParticipants(manifest);
 
   const videoParticipants = manifestParticipants
-    .filter((participant) => participant.videoSegments.length > 0)
+    .filter(
+      (participant) =>
+        participant.videoSegments.length > 0 ||
+        participant.audioSegments.length > 0 ||
+        participant.screenShareSegments.length > 0
+    )
     .slice(0, MAX_VIDEOS);
 
   const videoSegments = [];
