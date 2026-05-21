@@ -7,12 +7,15 @@ const {
   resolveWorkdirRelative,
 } = require("./src/paths");
 
-const WIDTH = 1920;
-const HEIGHT = 1080;
-const FPS = 30;
+const WIDTH = 854;
+const HEIGHT = 480;
+const FPS = 10;
 const MAX_VIDEOS = 16;
 const FONT_FILE = "C\\:/Windows/Fonts/arial.ttf";
 const INTRO_SECONDS = 2;
+const VIDEO_PRESET = "ultrafast";
+const VIDEO_CRF = "35";
+const AUDIO_BITRATE = "64k";
 
 function getGrid(count) {
   if (count <= 1) return { cols: 1, rows: 1 };
@@ -237,7 +240,10 @@ function getCallMetadata(manifest) {
 function addIntroFilters(filters, manifest, baseLabel) {
   const metadata = getCallMetadata(manifest);
   const titleLines = splitTitle(metadata.title);
-  const titleY = titleLines.length > 1 ? 282 : 326;
+  const scaleX = (value) => Math.round((value / 1920) * WIDTH);
+  const scaleY = (value) => Math.round((value / 1080) * HEIGHT);
+  const font = (value) => Math.max(10, Math.round((value / 1080) * HEIGHT));
+  const titleY = titleLines.length > 1 ? scaleY(282) : scaleY(326);
   let current = "introbg";
 
   filters.push(
@@ -246,7 +252,9 @@ function addIntroFilters(filters, manifest, baseLabel) {
 
   filters.push(
     `[${current}]` +
-      `drawtext=fontfile='${FONT_FILE}':text='Ellevo Connect':x=${WIDTH}-420:y=86:fontsize=30:fontcolor=white@0.9` +
+      `drawtext=fontfile='${FONT_FILE}':text='Ellevo Connect':x=${WIDTH}-${scaleX(
+        420
+      )}:y=${scaleY(86)}:fontsize=${font(30)}:fontcolor=white@0.9` +
       `[introbrand]`
   );
   current = "introbrand";
@@ -257,7 +265,9 @@ function addIntroFilters(filters, manifest, baseLabel) {
       `[${current}]` +
         `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
           line
-        )}':x=130:y=${titleY + index * 76}:fontsize=62:fontcolor=white` +
+        )}':x=${scaleX(130)}:y=${titleY + index * scaleY(
+          76
+        )}:fontsize=${font(62)}:fontcolor=white` +
         `[${out}]`
     );
     current = out;
@@ -268,7 +278,9 @@ function addIntroFilters(filters, manifest, baseLabel) {
       `[${current}]` +
         `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
           metadata.startedAt
-        )}':x=132:y=${titleY + titleLines.length * 76 + 2}:fontsize=28:fontcolor=white@0.86` +
+        )}':x=${scaleX(132)}:y=${
+          titleY + titleLines.length * scaleY(76) + scaleY(2)
+        }:fontsize=${font(28)}:fontcolor=white@0.86` +
         `[introdate]`
     );
     current = "introdate";
@@ -279,7 +291,9 @@ function addIntroFilters(filters, manifest, baseLabel) {
       `[${current}]` +
         `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
           truncate(metadata.description, 92)
-        )}':x=132:y=${titleY + titleLines.length * 76 + 48}:fontsize=24:fontcolor=white@0.72` +
+        )}':x=${scaleX(132)}:y=${
+          titleY + titleLines.length * scaleY(76) + scaleY(48)
+        }:fontsize=${font(24)}:fontcolor=white@0.72` +
         `[introdesc]`
     );
     current = "introdesc";
@@ -287,14 +301,22 @@ function addIntroFilters(filters, manifest, baseLabel) {
 
   filters.push(
     `[${current}]` +
-      `drawtext=fontfile='${FONT_FILE}':text='Recorded by':x=132:y=760:fontsize=15:fontcolor=white@0.55,` +
+      `drawtext=fontfile='${FONT_FILE}':text='Recorded by':x=${scaleX(
+        132
+      )}:y=${scaleY(760)}:fontsize=${font(15)}:fontcolor=white@0.55,` +
       `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
         truncate(metadata.recorderBy, 38)
-      )}':x=132:y=788:fontsize=27:fontcolor=white@0.92,` +
-      `drawtext=fontfile='${FONT_FILE}':text='Organized by':x=520:y=760:fontsize=15:fontcolor=white@0.55,` +
+      )}':x=${scaleX(132)}:y=${scaleY(788)}:fontsize=${font(
+        27
+      )}:fontcolor=white@0.92,` +
+      `drawtext=fontfile='${FONT_FILE}':text='Organized by':x=${scaleX(
+        520
+      )}:y=${scaleY(760)}:fontsize=${font(15)}:fontcolor=white@0.55,` +
       `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
         truncate(metadata.organizedBy, 38)
-      )}':x=520:y=788:fontsize=27:fontcolor=white@0.92` +
+      )}':x=${scaleX(520)}:y=${scaleY(788)}:fontsize=${font(
+        27
+      )}:fontcolor=white@0.92` +
       `[intro]`
   );
 
@@ -425,11 +447,19 @@ function main(workdir) {
   participantTiles.forEach((tile, index) => {
     const out = `tmpname${index}`;
     const escapedName = escapeDrawtext(displayName(tile.name));
+    const labelH = Math.max(20, Math.round(cellH * 0.11));
+    const labelFont = Math.max(10, Math.round(labelH * 0.48));
 
     filters.push(
       `[${currentVideoBase}]` +
-        `drawbox=x=${tile.x}:y=${tile.y + cellH - 56}:w=${cellW}:h=56:color=black@0.55:t=fill,` +
-        `drawtext=fontfile='${FONT_FILE}':text='${escapedName}':x=${tile.x + 24}:y=${tile.y + cellH - 40}:fontsize=28:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1` +
+        `drawbox=x=${tile.x}:y=${
+          tile.y + cellH - labelH
+        }:w=${cellW}:h=${labelH}:color=black@0.55:t=fill,` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapedName}':x=${
+          tile.x + Math.max(8, Math.round(cellW * 0.025))
+        }:y=${
+          tile.y + cellH - Math.round(labelH * 0.72)
+        }:fontsize=${labelFont}:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1` +
         `[${out}]`
     );
 
@@ -486,8 +516,7 @@ function main(workdir) {
     filters.push(
       `[${inputIndex}:a]` +
         `asetpts=PTS-STARTPTS,` +
-        `adelay=${delayMs}|${delayMs},` +
-        `apad` +
+        `adelay=${delayMs}|${delayMs}` +
         `[${label}]`
     );
 
@@ -534,15 +563,15 @@ function main(workdir) {
     "-c:v",
     "libx264",
     "-preset",
-    "veryfast",
+    VIDEO_PRESET,
     "-crf",
-    "23",
+    VIDEO_CRF,
     "-pix_fmt",
     "yuv420p",
     "-c:a",
     "aac",
     "-b:a",
-    "160k",
+    AUDIO_BITRATE,
     finalOutput
   );
 
