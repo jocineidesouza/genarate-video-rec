@@ -4,6 +4,7 @@ const { execFileSync } = require('node:child_process');
 
 const DEFAULT_PROJECT = 'ellevo-connect-dev';
 const DEFAULT_BUCKET = 'ellevo-connect-dev.firebasestorage.app';
+const FIREBASE_CLI_CLIENT_SECRET = 'j9iVZfS8kkCEFUPaAeJV0sAi';
 
 function printUsage() {
   console.log(`
@@ -70,7 +71,37 @@ function normalizeStoragePath(input) {
   return input.replace(/^\/+/, '').replace(/\/+$/, '');
 }
 
-function getAccessToken() {
+async function refreshAccessToken(account) {
+  const refreshToken = account && account.tokens && account.tokens.refresh_token;
+  const clientId = account && account.user && account.user.azp;
+
+  if (!refreshToken || !clientId) {
+    return '';
+  }
+
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: FIREBASE_CLI_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`Nao consegui renovar o token do Firebase CLI.\n${body}`);
+  }
+
+  const data = await response.json();
+  return data.access_token || '';
+}
+
+async function getAccessToken() {
   let output;
 
   try {
@@ -86,6 +117,15 @@ function getAccessToken() {
   const parsed = JSON.parse(output);
   const account = parsed.result && parsed.result[0];
   const token = account && account.tokens && account.tokens.access_token;
+  const expiresAt = Number(account && account.tokens && account.tokens.expires_at);
+
+  if (expiresAt && expiresAt <= Date.now() + 60_000) {
+    const refreshedToken = await refreshAccessToken(account);
+
+    if (refreshedToken) {
+      return refreshedToken;
+    }
+  }
 
   if (!token) {
     throw new Error('Firebase CLI nao retornou access_token. Rode "firebase login" novamente.');
@@ -173,7 +213,7 @@ async function main() {
   console.log(`Prefixo: ${prefix}`);
   console.log(`Destino: ${destRoot}`);
 
-  const token = getAccessToken();
+  const token = await getAccessToken();
   const objects = await listObjects({ bucket: args.bucket, prefix, token });
 
   if (objects.length === 0) {
