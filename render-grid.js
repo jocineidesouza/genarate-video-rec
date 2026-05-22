@@ -23,8 +23,8 @@ const GRID_GAP = 8;
 const TILE_BACKGROUND = "2f2d38";
 const AVATAR_BACKGROUND = "5b5a66";
 const AVATAR_CIRCLE = "\u25CF";
-const STATIC_GRID_PREFIX = "grid-background";
-const STATIC_LABELS_PREFIX = "grid-labels";
+const STATIC_GRID_FILE = "grid-background.png";
+const STATIC_LABELS_FILE = "grid-labels.png";
 
 function getGrid(count) {
   if (count <= 1) return { cols: 1, rows: 1 };
@@ -335,116 +335,11 @@ function runFfmpeg(args) {
   }
 }
 
-function segmentEndMs(segment) {
-  return segment.offsetMs + segment.durationMs;
-}
-
-function overlaps(startMs, endMs, segment) {
-  return segment.offsetMs < endMs && segmentEndMs(segment) > startMs;
-}
-
-function isParticipantActive(participant, startMs, endMs) {
-  return [...participant.videoSegments, ...participant.audioSegments].some((segment) =>
-    overlaps(startMs, endMs, segment)
-  );
-}
-
-function layoutKey(participants) {
-  return participants.map((participant) => participant.participantIdentity).join("|") || "empty";
-}
-
-function buildLayoutIntervals(participants, durationMs) {
-  const points = new Set([0, Math.max(0, Math.round(durationMs))]);
-
-  participants.forEach((participant) => {
-    [...participant.videoSegments, ...participant.audioSegments].forEach((segment) => {
-      points.add(Math.max(0, Math.round(segment.offsetMs)));
-      points.add(Math.max(0, Math.round(segmentEndMs(segment))));
-    });
-  });
-
-  const sortedPoints = [...points].sort((a, b) => a - b);
-  const intervals = [];
-
-  for (let index = 0; index < sortedPoints.length - 1; index += 1) {
-    const startMs = sortedPoints[index];
-    const endMs = sortedPoints[index + 1];
-
-    if (endMs <= startMs) {
-      continue;
-    }
-
-    const activeParticipants = participants.filter((participant) =>
-      isParticipantActive(participant, startMs, endMs)
-    );
-    const key = layoutKey(activeParticipants);
-    const previous = intervals[intervals.length - 1];
-
-    if (previous && previous.key === key && previous.endMs === startMs) {
-      previous.endMs = endMs;
-      continue;
-    }
-
-    intervals.push({
-      startMs,
-      endMs,
-      key,
-      participants: activeParticipants,
-    });
-  }
-
-  return intervals;
-}
-
-function buildParticipantTiles(workdir, participants, cellW, cellH, cols, gap) {
-  let avatarInputIndex = 0;
-
-  return participants.map((participant, index) => {
-    const col = index % cols;
-    const row = Math.floor(index / cols);
-    const avatarFile = participant.avatarFile
-      ? resolveWorkdirRelative(workdir, participant.avatarFile)
-      : "";
-    const hasAvatarFile = Boolean(avatarFile && fs.existsSync(avatarFile));
-
-    return {
-      identity: participant.participantIdentity,
-      name: participant.name || participant.participantIdentity,
-      initials: initials(participant.name || participant.participantIdentity),
-      avatarFile: hasAvatarFile ? avatarFile : "",
-      avatarInputIndex: hasAvatarFile ? avatarInputIndex++ : null,
-      x: gap + col * (cellW + gap),
-      y: gap + row * (cellH + gap),
-      w: cellW,
-      h: cellH,
-    };
-  });
-}
-
-function buildLayoutDescriptor(workdir, participants, key) {
-  const { cols, rows } = getGrid(Math.max(1, participants.length));
-  const gap = GRID_GAP;
-  const cellW = Math.floor((WIDTH - gap * (cols + 1)) / cols);
-  const cellH = Math.floor((HEIGHT - gap * (rows + 1)) / rows);
-  const tiles = buildParticipantTiles(workdir, participants, cellW, cellH, cols, gap);
-  const tileByIdentity = new Map(tiles.map((tile) => [tile.identity, tile]));
-
-  return {
-    key,
-    participants,
-    tiles,
-    tileByIdentity,
-    cellW,
-    cellH,
-  };
-}
-
-function buildStaticGridAssets(workdir, layout, index) {
+function buildStaticGridAssets(workdir, participantTiles, cellW, cellH) {
   const outputDir = getOutputDir(workdir);
-  const suffix = String(index).padStart(3, "0");
-  const gridPath = path.join(outputDir, `${STATIC_GRID_PREFIX}-${suffix}.png`);
-  const labelsPath = path.join(outputDir, `${STATIC_LABELS_PREFIX}-${suffix}.png`);
-  const avatarInputs = layout.tiles
+  const gridPath = path.join(outputDir, STATIC_GRID_FILE);
+  const labelsPath = path.join(outputDir, STATIC_LABELS_FILE);
+  const avatarInputs = participantTiles
     .filter((tile) => tile.avatarFile)
     .map((tile) => tile.avatarFile);
 
@@ -453,16 +348,16 @@ function buildStaticGridAssets(workdir, layout, index) {
   ];
   let currentBackground = "bg0";
 
-  layout.tiles.forEach((tile, tileIndex) => {
-    const out = `bgtile${tileIndex}`;
-    const avatarSize = Math.max(40, Math.round(Math.min(tile.w, tile.h) * 0.34));
-    const avatarX = tile.x + Math.round((tile.w - avatarSize) / 2);
-    const avatarY = tile.y + Math.round((tile.h - avatarSize) / 2);
+  participantTiles.forEach((tile, index) => {
+    const out = `bgtile${index}`;
+    const avatarSize = Math.max(40, Math.round(Math.min(cellW, cellH) * 0.34));
+    const avatarX = tile.x + Math.round((cellW - avatarSize) / 2);
+    const avatarY = tile.y + Math.round((cellH - avatarSize) / 2);
     const initialsFont = Math.max(16, Math.round(avatarSize * 0.38));
 
     backgroundFilters.push(
       `[${currentBackground}]` +
-        `drawbox=x=${tile.x}:y=${tile.y}:w=${tile.w}:h=${tile.h}:color=0x${TILE_BACKGROUND}@1:t=fill,` +
+        `drawbox=x=${tile.x}:y=${tile.y}:w=${cellW}:h=${cellH}:color=0x${TILE_BACKGROUND}@1:t=fill,` +
         `drawtext=fontfile='${FONT_FILE}':text='${AVATAR_CIRCLE}':x=${avatarX}+(${avatarSize}-text_w)/2:y=${avatarY}+(${avatarSize}-text_h)/2:fontsize=${Math.round(
           avatarSize * 1.2
         )}:fontcolor=0x${AVATAR_BACKGROUND},` +
@@ -475,16 +370,16 @@ function buildStaticGridAssets(workdir, layout, index) {
     currentBackground = out;
   });
 
-  layout.tiles.forEach((tile, tileIndex) => {
+  participantTiles.forEach((tile, index) => {
     if (tile.avatarInputIndex === null) {
       return;
     }
 
-    const avatarSize = Math.max(40, Math.round(Math.min(tile.w, tile.h) * 0.34));
-    const avatarX = tile.x + Math.round((tile.w - avatarSize) / 2);
-    const avatarY = tile.y + Math.round((tile.h - avatarSize) / 2);
-    const avatarLabel = `bgavatar${tileIndex}`;
-    const out = `bgwithavatar${tileIndex}`;
+    const avatarSize = Math.max(40, Math.round(Math.min(cellW, cellH) * 0.34));
+    const avatarX = tile.x + Math.round((cellW - avatarSize) / 2);
+    const avatarY = tile.y + Math.round((cellH - avatarSize) / 2);
+    const avatarLabel = `bgavatar${index}`;
+    const out = `bgwithavatar${index}`;
 
     backgroundFilters.push(
       `[${tile.avatarInputIndex}:v]` +
@@ -519,21 +414,21 @@ function buildStaticGridAssets(workdir, layout, index) {
   ];
   let currentLabel = "label0";
 
-  layout.tiles.forEach((tile, tileIndex) => {
-    const out = `labeltile${tileIndex}`;
+  participantTiles.forEach((tile, index) => {
+    const out = `labeltile${index}`;
     const escapedName = escapeDrawtext(displayName(tile.name));
-    const labelH = Math.max(20, Math.round(tile.h * 0.11));
+    const labelH = Math.max(20, Math.round(cellH * 0.11));
     const labelFont = Math.max(10, Math.round(labelH * 0.48));
 
     labelFilters.push(
       `[${currentLabel}]` +
         `drawbox=x=${tile.x}:y=${
-          tile.y + tile.h - labelH
-        }:w=${tile.w}:h=${labelH}:color=black@0.55:t=fill,` +
+          tile.y + cellH - labelH
+        }:w=${cellW}:h=${labelH}:color=black@0.55:t=fill,` +
         `drawtext=fontfile='${FONT_FILE}':text='${escapedName}':x=${
-          tile.x + Math.max(8, Math.round(tile.w * 0.025))
+          tile.x + Math.max(8, Math.round(cellW * 0.025))
         }:y=${
-          tile.y + tile.h - Math.round(labelH * 0.72)
+          tile.y + cellH - Math.round(labelH * 0.72)
         }:fontsize=${labelFont}:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1` +
         `[${out}]`
     );
@@ -554,6 +449,7 @@ function buildStaticGridAssets(workdir, layout, index) {
     labelsPath,
   ];
 
+  console.log("Gerando imagens estaticas do grid...");
   runFfmpeg(backgroundArgs);
   runFfmpeg(labelArgs);
 
@@ -590,7 +486,6 @@ function main(workdir) {
       videoSegments.push({
         ...segment,
         participantIndex,
-        participantIdentity: participant.participantIdentity,
       });
     }
   });
@@ -606,37 +501,48 @@ function main(workdir) {
     throw new Error("Nenhum video encontrado no manifest.");
   }
 
+  const { cols, rows } = getGrid(Math.max(1, videoParticipants.length));
+
+  const gap = GRID_GAP;
+  const cellW = Math.floor((WIDTH - gap * (cols + 1)) / cols);
+  const cellH = Math.floor((HEIGHT - gap * (rows + 1)) / rows);
+
   const filters = [];
   const outputDurationSec = manifest.durationMs / 1000 + INTRO_SECONDS;
 
-  const layoutIntervals = buildLayoutIntervals(videoParticipants, manifest.durationMs);
-  const layoutsByKey = new Map();
+  const participantTiles = [];
+  let avatarInputIndex = 0;
+  videoParticipants.forEach((participant, index) => {
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    const avatarFile = participant.avatarFile
+      ? resolveWorkdirRelative(workdir, participant.avatarFile)
+      : "";
+    const hasAvatarFile = Boolean(avatarFile && fs.existsSync(avatarFile));
 
-  layoutIntervals.forEach((interval) => {
-    if (!layoutsByKey.has(interval.key)) {
-      layoutsByKey.set(
-        interval.key,
-        buildLayoutDescriptor(workdir, interval.participants, interval.key)
-      );
-    }
+    participantTiles.push({
+      identity: participant.participantIdentity,
+      name: participant.name || participant.participantIdentity,
+      initials: initials(participant.name || participant.participantIdentity),
+      avatarFile: hasAvatarFile ? avatarFile : "",
+      avatarInputIndex: hasAvatarFile ? avatarInputIndex++ : null,
+      x: gap + col * (cellW + gap),
+      y: gap + row * (cellH + gap),
+    });
   });
 
-  const layouts = [...layoutsByKey.values()];
-  console.log(`Gerando ${layouts.length} layout(s) estatico(s) do grid...`);
-
-  const inputs = [];
-  layouts.forEach((layout, index) => {
-    const staticAssets = buildStaticGridAssets(workdir, layout, index);
-    layout.gridPath = staticAssets.gridPath;
-    layout.labelsPath = staticAssets.labelsPath;
-    layout.gridInputIndex = inputs.length / 4;
-    inputs.push("-loop", "1", "-i", layout.gridPath);
-    layout.labelsInputIndex = inputs.length / 4;
-    inputs.push("-loop", "1", "-i", layout.labelsPath);
-  });
-
-  const layoutInputCount = layouts.length * 2;
-  const videoInputStart = layoutInputCount;
+  const staticAssets = buildStaticGridAssets(workdir, participantTiles, cellW, cellH);
+  const inputs = [
+    "-loop",
+    "1",
+    "-i",
+    staticAssets.gridPath,
+    "-loop",
+    "1",
+    "-i",
+    staticAssets.labelsPath,
+  ];
+  const videoInputStart = 2;
 
   for (const segment of videoSegments) {
     inputs.push("-i", absFile(workdir, segment));
@@ -652,139 +558,37 @@ function main(workdir) {
 
   let currentVideoBase = "base";
 
-  filters.push(`color=c=0x111111:s=${WIDTH}x${HEIGHT}:r=${FPS}:d=${outputDurationSec}[base]`);
-
-  const layoutIntervalIndexes = new Map();
-  layoutIntervals.forEach((interval, index) => {
-    if (!layoutIntervalIndexes.has(interval.key)) {
-      layoutIntervalIndexes.set(interval.key, []);
-    }
-    layoutIntervalIndexes.get(interval.key).push(index);
-  });
-
-  layouts.forEach((layout) => {
-    const intervalIndexes = layoutIntervalIndexes.get(layout.key) || [];
-    const bgLabels = intervalIndexes.map((index) => `layoutbg${index}`);
-    const labelLabels = intervalIndexes.map((index) => `layoutlabels${index}`);
-
-    if (bgLabels.length === 1) {
-      filters.push(
-        `[${layout.gridInputIndex}:v]fps=${FPS},scale=${WIDTH}:${HEIGHT},setsar=1[${bgLabels[0]}]`
-      );
-      filters.push(
-        `[${layout.labelsInputIndex}:v]fps=${FPS},format=rgba[${labelLabels[0]}]`
-      );
-      return;
-    }
-
-    filters.push(
-      `[${layout.gridInputIndex}:v]fps=${FPS},scale=${WIDTH}:${HEIGHT},setsar=1,split=${bgLabels.length}${bgLabels
-        .map((label) => `[${label}]`)
-        .join("")}`
-    );
-    filters.push(
-      `[${layout.labelsInputIndex}:v]fps=${FPS},format=rgba,split=${labelLabels.length}${labelLabels
-        .map((label) => `[${label}]`)
-        .join("")}`
-    );
-  });
-
-  layoutIntervals.forEach((interval, index) => {
-    const startSec = interval.startMs / 1000 + INTRO_SECONDS;
-    const endSec = interval.endMs / 1000 + INTRO_SECONDS;
-    const out = `layoutbase${index}`;
-
-    filters.push(
-      `[${currentVideoBase}][layoutbg${index}]overlay=x=0:y=0:eof_action=pass:enable='between(t,${startSec},${endSec})'[${out}]`
-    );
-
-    currentVideoBase = out;
-  });
-
-  const videoPiecesBySegment = videoSegments.map((segment) =>
-    layoutIntervals
-      .map((interval, intervalIndex) => {
-        if (!overlaps(interval.startMs, interval.endMs, segment)) {
-          return null;
-        }
-
-        const layout = layoutsByKey.get(interval.key);
-        const tile = layout.tileByIdentity.get(segment.participantIdentity);
-
-        if (!tile) {
-          return null;
-        }
-
-        return {
-          intervalIndex,
-          tile,
-          startMs: Math.max(interval.startMs, segment.offsetMs),
-          endMs: Math.min(interval.endMs, segmentEndMs(segment)),
-        };
-      })
-      .filter(Boolean)
-  );
+  filters.push(`[0:v]fps=${FPS},scale=${WIDTH}:${HEIGHT},setsar=1[base]`);
 
   videoSegments.forEach((segment, index) => {
-    const pieces = videoPiecesBySegment[index];
-
-    if (pieces.length === 0) {
-      return;
-    }
-
     const delaySec = segment.offsetMs / 1000 + INTRO_SECONDS;
-    const inputIndex = videoInputStart + index;
-    const rawLabels = pieces.map((_, pieceIndex) => `vraw${index}_${pieceIndex}`);
-
-    if (rawLabels.length === 1) {
-      filters.push(
-        `[${inputIndex}:v]setpts=PTS-STARTPTS+${delaySec}/TB[${rawLabels[0]}]`
-      );
-    } else {
-      filters.push(
-        `[${inputIndex}:v]setpts=PTS-STARTPTS+${delaySec}/TB,split=${rawLabels.length}${rawLabels
-          .map((label) => `[${label}]`)
-          .join("")}`
-      );
-    }
-
-    pieces.forEach((piece, pieceIndex) => {
-      const scaled = `v${index}_${pieceIndex}`;
-      const out = `tmpv${index}_${pieceIndex}`;
-      const startSec = piece.startMs / 1000 + INTRO_SECONDS;
-      const endSec = piece.endMs / 1000 + INTRO_SECONDS;
-
-      filters.push(
-        `[${rawLabels[pieceIndex]}]` +
-          `scale=${piece.tile.w}:${piece.tile.h}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
-          `setsar=1,` +
-          `pad=${piece.tile.w}:${piece.tile.h}:(ow-iw)/2:(oh-ih)/2:color=black` +
-          `[${scaled}]`
-      );
-
-      filters.push(
-        `[${currentVideoBase}][${scaled}]` +
-          `overlay=x=${piece.tile.x}:y=${piece.tile.y}:eof_action=pass:enable='between(t,${startSec},${endSec})'` +
-          `[${out}]`
-      );
-
-      currentVideoBase = out;
-    });
-  });
-
-  layoutIntervals.forEach((interval, index) => {
-    const startSec = interval.startMs / 1000 + INTRO_SECONDS;
-    const endSec = interval.endMs / 1000 + INTRO_SECONDS;
-    const out = `gridwithlabels${index}`;
+    const endSec = (segment.offsetMs + segment.durationMs) / 1000 + INTRO_SECONDS;
+    const scaled = `v${index}`;
+    const out = `tmpv${index}`;
+    const tile = participantTiles[segment.participantIndex];
 
     filters.push(
-      `[${currentVideoBase}][layoutlabels${index}]overlay=x=0:y=0:eof_action=pass:enable='between(t,${startSec},${endSec})'[${out}]`
+      `[${videoInputStart + index}:v]` +
+        `setpts=PTS-STARTPTS+${delaySec}/TB,` +
+        `scale=${cellW}:${cellH}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
+        `setsar=1,` +
+        `pad=${cellW}:${cellH}:(ow-iw)/2:(oh-ih)/2:color=black` +
+        `[${scaled}]`
+    );
+
+    filters.push(
+      `[${currentVideoBase}][${scaled}]` +
+        `overlay=x=${tile.x}:y=${tile.y}:eof_action=pass:enable='between(t,${delaySec},${endSec})'` +
+        `[${out}]`
     );
 
     currentVideoBase = out;
   });
 
-  let currentOutputBase = currentVideoBase;
+  filters.push(`[1:v]fps=${FPS},format=rgba[labels]`);
+  filters.push(`[${currentVideoBase}][labels]overlay=x=0:y=0:eof_action=pass[gridwithlabels]`);
+
+  let currentOutputBase = "gridwithlabels";
   const screenShareInputStart = videoInputStart + videoSegments.length;
 
   screenShareSegments.forEach((segment, index) => {
