@@ -6,7 +6,8 @@
   "scripts": {
     "copyst": "node copyst.js",
     "manifest": "node generate-manifest.js",
-    "render:grid": "node render-grid.js"
+    "render:grid": "node render-grid.js",
+    "render:dynamic-scenes": "node render-dynamic-scenes.js"
   },
   "keywords": [],
   "author": "",

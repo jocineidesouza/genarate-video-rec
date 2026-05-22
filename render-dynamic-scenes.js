@@ -1,0 +1,918 @@
+const fs = require("fs");
+const path = require("path");
+const { spawnSync } = require("child_process");
+const { runCli } = require("./src/cli");
+const {
+  ensureDir,
+  getManifestPath,
+  getOutputDir,
+  resolveWorkdirRelative,
+} = require("./src/paths");
+
+const WIDTH = 854;
+const HEIGHT = 480;
+const FPS = 8;
+const MAX_VIDEOS = 16;
+const FONT_FILE = "C\\:/Windows/Fonts/arial.ttf";
+const INTRO_SECONDS = 2;
+const VIDEO_PRESET = "ultrafast";
+const VIDEO_BITRATE = "200k";
+const VIDEO_BUFSIZE = "256k";
+const AUDIO_BITRATE = "48k";
+const GRID_GAP = 8;
+const TILE_BACKGROUND = "2f2d38";
+const AVATAR_BACKGROUND = "5b5a66";
+const AVATAR_CIRCLE = "\u25CF";
+const SCENES_DIR = "dynamic-scenes";
+const FILTER_FILE = "filter.txt";
+const CONCAT_FILE = "concat-list.txt";
+const FINAL_FILE = "final-dynamic-scenes.mp4";
+
+function getGrid(count) {
+  if (count <= 1) return { cols: 1, rows: 1 };
+  if (count <= 2) return { cols: 2, rows: 1 };
+  if (count <= 4) return { cols: 2, rows: 2 };
+  if (count <= 6) return { cols: 3, rows: 2 };
+  if (count <= 9) return { cols: 3, rows: 3 };
+  return { cols: 4, rows: 4 };
+}
+
+function runFfmpeg(args) {
+  const result = spawnSync("ffmpeg", args, { stdio: "inherit" });
+
+  if (result.error) {
+    console.error(`Erro ao executar FFmpeg: ${result.error.message}`);
+    process.exit(1);
+  }
+
+  if (result.status !== 0) {
+    process.exit(result.status || 1);
+  }
+}
+
+function assertFfmpegAvailable() {
+  const result = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" });
+
+  if (result.error || result.status !== 0) {
+    throw new Error("FFmpeg nao encontrado no PATH");
+  }
+}
+
+function absFile(workdir, segment) {
+  return resolveWorkdirRelative(workdir, segment.file);
+}
+
+function toSegment(track) {
+  return {
+    file: track.file,
+    fileName: track.fileName,
+    trackId: track.trackId,
+    offsetMs: track.offsetMs,
+    durationMs: track.durationMs,
+    startedAtNs: track.startedAtNs,
+    endedAtNs: track.endedAtNs,
+  };
+}
+
+function segmentEndMs(segment) {
+  return segment.offsetMs + segment.durationMs;
+}
+
+function overlaps(startMs, endMs, segment) {
+  return segment.offsetMs < endMs && segmentEndMs(segment) > startMs;
+}
+
+function buildParticipantsFromTracks(tracks) {
+  const byIdentity = new Map();
+
+  for (const track of tracks || []) {
+    const isCamera = track.kind === "video" && track.source === "camera";
+    const isMicrophone = track.kind === "audio" && track.source === "microphone";
+    const isScreenShare = track.kind === "video" && track.source === "screen_share";
+
+    if (!isCamera && !isMicrophone && !isScreenShare) {
+      continue;
+    }
+
+    if (!byIdentity.has(track.participantIdentity)) {
+      byIdentity.set(track.participantIdentity, {
+        participantIdentity: track.participantIdentity,
+        name: track.participantIdentity,
+        videoSegments: [],
+        audioSegments: [],
+        screenShareSegments: [],
+      });
+    }
+
+    const participant = byIdentity.get(track.participantIdentity);
+
+    if (isCamera) {
+      participant.videoSegments.push(toSegment(track));
+    } else if (isMicrophone) {
+      participant.audioSegments.push(toSegment(track));
+    } else {
+      participant.screenShareSegments.push(toSegment(track));
+    }
+  }
+
+  return Array.from(byIdentity.values()).map(sortParticipantSegments).sort(compareParticipants);
+}
+
+function sortParticipantSegments(participant) {
+  return {
+    ...participant,
+    videoSegments: [...(participant.videoSegments || [])].sort(
+      (a, b) => a.offsetMs - b.offsetMs
+    ),
+    audioSegments: [...(participant.audioSegments || [])].sort(
+      (a, b) => a.offsetMs - b.offsetMs
+    ),
+    screenShareSegments: [...(participant.screenShareSegments || [])].sort(
+      (a, b) => a.offsetMs - b.offsetMs
+    ),
+  };
+}
+
+function compareParticipants(a, b) {
+  const firstA = getPresence(a)?.startMs ?? Number.MAX_SAFE_INTEGER;
+  const firstB = getPresence(b)?.startMs ?? Number.MAX_SAFE_INTEGER;
+
+  if (firstA !== firstB) return firstA - firstB;
+  return a.participantIdentity.localeCompare(b.participantIdentity);
+}
+
+function getManifestParticipants(manifest) {
+  if (Array.isArray(manifest.participants)) {
+    return manifest.participants
+      .map((participant) =>
+        sortParticipantSegments({
+          participantIdentity: participant.participantIdentity,
+          name: participant.name || participant.participantIdentity,
+          avatarFile: participant.avatarFile || "",
+          videoSegments: participant.videoSegments || [],
+          audioSegments: participant.audioSegments || [],
+          screenShareSegments: participant.screenShareSegments || [],
+        })
+      )
+      .sort(compareParticipants);
+  }
+
+  return buildParticipantsFromTracks(manifest.tracks);
+}
+
+function getPresence(participant) {
+  const segments = [
+    ...participant.videoSegments,
+    ...participant.audioSegments,
+    ...participant.screenShareSegments,
+  ];
+
+  if (segments.length === 0) {
+    return null;
+  }
+
+  return {
+    startMs: Math.min(...segments.map((segment) => segment.offsetMs)),
+    endMs: Math.max(...segments.map((segment) => segmentEndMs(segment))),
+  };
+}
+
+function displayName(name) {
+  const value = String(name || "unknown");
+  return value.length > 34 ? `${value.slice(0, 31)}...` : value;
+}
+
+function escapeDrawtext(value) {
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'");
+}
+
+function initials(name) {
+  const value = String(name || "unknown")
+    .replace(/[_-]+/g, " ")
+    .trim();
+  const words = value.split(/\s+/).filter(Boolean);
+
+  if (words.length >= 2) {
+    return `${words[0][0]}${words[1][0]}`.toUpperCase();
+  }
+
+  return value.slice(0, 2).toUpperCase() || "?";
+}
+
+function truncate(value, maxLength) {
+  const text = String(value || "");
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+function splitTitle(title) {
+  const text = String(title || "Untitled meeting").trim();
+  const maxLineLength = 48;
+  const words = text.split(/\s+/);
+  const lines = [];
+  let current = "";
+
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+
+    if (next.length <= maxLineLength || current.length === 0) {
+      current = next;
+      continue;
+    }
+
+    lines.push(current);
+    current = word;
+
+    if (lines.length === 1) {
+      break;
+    }
+  }
+
+  if (current && lines.length < 2) {
+    lines.push(current);
+  }
+
+  return lines.length > 0
+    ? lines.map((line) => truncate(line, 58))
+    : ["Untitled meeting"];
+}
+
+function formatUtcFromNs(ns) {
+  if (!ns) return "";
+
+  const millis = Number(BigInt(ns) / 1_000_000n);
+  const date = new Date(millis);
+
+  if (Number.isNaN(date.getTime())) return "";
+
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const hour = String(date.getUTCHours()).padStart(2, "0");
+  const minute = String(date.getUTCMinutes()).padStart(2, "0");
+
+  return `${year}-${month}-${day} ${hour}:${minute} UTC`;
+}
+
+function getCallMetadata(manifest) {
+  const call = manifest.call || {};
+  const firstTrack = Array.isArray(manifest.tracks) ? manifest.tracks[0] || {} : {};
+
+  return {
+    title: call.title || firstTrack.roomName || "Untitled meeting",
+    description: call.description || "",
+    recorderBy: call.recorderBy || call.recordedBy || "unknown",
+    organizedBy: call.organizedBy || call.OrganizedBy || "unknown",
+    startedAt: formatUtcFromNs(manifest.recordingStartNs),
+  };
+}
+
+function addIntroFilters(filters, manifest, baseLabel) {
+  const metadata = getCallMetadata(manifest);
+  const titleLines = splitTitle(metadata.title);
+  const scaleX = (value) => Math.round((value / 1920) * WIDTH);
+  const scaleY = (value) => Math.round((value / 1080) * HEIGHT);
+  const font = (value) => Math.max(10, Math.round((value / 1080) * HEIGHT));
+  const titleY = titleLines.length > 1 ? scaleY(282) : scaleY(326);
+  let current = "introbg";
+
+  filters.push(
+    `color=c=0x2f2d38:s=${WIDTH}x${HEIGHT}:r=${FPS}:d=${INTRO_SECONDS}[introbg]`
+  );
+
+  filters.push(
+    `[${current}]` +
+      `drawtext=fontfile='${FONT_FILE}':text='Ellevo Connect':x=${WIDTH}-${scaleX(
+        420
+      )}:y=${scaleY(86)}:fontsize=${font(30)}:fontcolor=white@0.9` +
+      `[introbrand]`
+  );
+  current = "introbrand";
+
+  titleLines.forEach((line, index) => {
+    const out = `introtitle${index}`;
+    filters.push(
+      `[${current}]` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+          line
+        )}':x=${scaleX(130)}:y=${titleY + index * scaleY(
+          76
+        )}:fontsize=${font(62)}:fontcolor=white` +
+        `[${out}]`
+    );
+    current = out;
+  });
+
+  if (metadata.startedAt) {
+    filters.push(
+      `[${current}]` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+          metadata.startedAt
+        )}':x=${scaleX(132)}:y=${
+          titleY + titleLines.length * scaleY(76) + scaleY(2)
+        }:fontsize=${font(28)}:fontcolor=white@0.86` +
+        `[introdate]`
+    );
+    current = "introdate";
+  }
+
+  if (metadata.description) {
+    filters.push(
+      `[${current}]` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+          truncate(metadata.description, 92)
+        )}':x=${scaleX(132)}:y=${
+          titleY + titleLines.length * scaleY(76) + scaleY(48)
+        }:fontsize=${font(24)}:fontcolor=white@0.72` +
+        `[introdesc]`
+    );
+    current = "introdesc";
+  }
+
+  filters.push(
+    `[${current}]` +
+      `drawtext=fontfile='${FONT_FILE}':text='Recorded by':x=${scaleX(
+        132
+      )}:y=${scaleY(760)}:fontsize=${font(15)}:fontcolor=white@0.55,` +
+      `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+        truncate(metadata.recorderBy, 38)
+      )}':x=${scaleX(132)}:y=${scaleY(788)}:fontsize=${font(
+        27
+      )}:fontcolor=white@0.92,` +
+      `drawtext=fontfile='${FONT_FILE}':text='Organized by':x=${scaleX(
+        520
+      )}:y=${scaleY(760)}:fontsize=${font(15)}:fontcolor=white@0.55,` +
+      `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+        truncate(metadata.organizedBy, 38)
+      )}':x=${scaleX(520)}:y=${scaleY(788)}:fontsize=${font(
+        27
+      )}:fontcolor=white@0.92` +
+      `[intro]`
+  );
+
+  filters.push(`[${baseLabel}][intro]overlay=x=0:y=0:eof_action=pass[vout]`);
+}
+
+function ffconcatPath(filePath) {
+  return filePath.replace(/\\/g, "/").replace(/'/g, "'\\''");
+}
+
+function seconds(ms) {
+  return Math.max(0, ms / 1000);
+}
+
+function getDynamicDir(workdir) {
+  return path.join(getOutputDir(workdir), SCENES_DIR);
+}
+
+function getFinalDynamicPath(workdir) {
+  return path.join(getOutputDir(workdir), FINAL_FILE);
+}
+
+function makeFilterScript(dir, name, filters) {
+  const filePath = path.join(dir, `${name}-${FILTER_FILE}`);
+  fs.writeFileSync(filePath, filters.join(";\n"), "utf8");
+  return filePath;
+}
+
+function encodeVideoArgs(outputFile) {
+  return [
+    "-r",
+    String(FPS),
+    "-c:v",
+    "libx264",
+    "-preset",
+    VIDEO_PRESET,
+    "-b:v",
+    VIDEO_BITRATE,
+    "-maxrate",
+    VIDEO_BITRATE,
+    "-bufsize",
+    VIDEO_BUFSIZE,
+    "-pix_fmt",
+    "yuv420p",
+    "-an",
+    outputFile,
+  ];
+}
+
+function buildParticipantTiles(workdir, participants, cellW, cellH, cols, gap) {
+  let avatarInputIndex = 0;
+
+  return participants.map((participant, index) => {
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    const avatarFile = participant.avatarFile
+      ? resolveWorkdirRelative(workdir, participant.avatarFile)
+      : "";
+    const hasAvatarFile = Boolean(avatarFile && fs.existsSync(avatarFile));
+
+    return {
+      identity: participant.participantIdentity,
+      name: participant.name || participant.participantIdentity,
+      initials: initials(participant.name || participant.participantIdentity),
+      avatarFile: hasAvatarFile ? avatarFile : "",
+      avatarInputIndex: hasAvatarFile ? avatarInputIndex++ : null,
+      x: gap + col * (cellW + gap),
+      y: gap + row * (cellH + gap),
+      w: cellW,
+      h: cellH,
+    };
+  });
+}
+
+function buildStaticGridAssets(workdir, sceneDir, sceneIndex, tiles) {
+  const suffix = String(sceneIndex).padStart(4, "0");
+  const gridPath = path.join(sceneDir, `grid-${suffix}.png`);
+  const labelsPath = path.join(sceneDir, `labels-${suffix}.png`);
+  const avatarInputs = tiles.filter((tile) => tile.avatarFile).map((tile) => tile.avatarFile);
+
+  const backgroundFilters = [
+    `color=c=0x111111:s=${WIDTH}x${HEIGHT}:r=1:d=1[bg0]`,
+  ];
+  let currentBackground = "bg0";
+
+  tiles.forEach((tile, index) => {
+    const out = `bgtile${index}`;
+    const avatarSize = Math.max(40, Math.round(Math.min(tile.w, tile.h) * 0.34));
+    const avatarX = tile.x + Math.round((tile.w - avatarSize) / 2);
+    const avatarY = tile.y + Math.round((tile.h - avatarSize) / 2);
+    const initialsFont = Math.max(16, Math.round(avatarSize * 0.38));
+
+    backgroundFilters.push(
+      `[${currentBackground}]` +
+        `drawbox=x=${tile.x}:y=${tile.y}:w=${tile.w}:h=${tile.h}:color=0x${TILE_BACKGROUND}@1:t=fill,` +
+        `drawtext=fontfile='${FONT_FILE}':text='${AVATAR_CIRCLE}':x=${avatarX}+(${avatarSize}-text_w)/2:y=${avatarY}+(${avatarSize}-text_h)/2:fontsize=${Math.round(
+          avatarSize * 1.2
+        )}:fontcolor=0x${AVATAR_BACKGROUND},` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+          tile.initials
+        )}':x=${avatarX}+(${avatarSize}-text_w)/2:y=${avatarY}+(${avatarSize}-text_h)/2:fontsize=${initialsFont}:fontcolor=white@0.95` +
+        `[${out}]`
+    );
+
+    currentBackground = out;
+  });
+
+  tiles.forEach((tile, index) => {
+    if (tile.avatarInputIndex === null) {
+      return;
+    }
+
+    const avatarSize = Math.max(40, Math.round(Math.min(tile.w, tile.h) * 0.34));
+    const avatarX = tile.x + Math.round((tile.w - avatarSize) / 2);
+    const avatarY = tile.y + Math.round((tile.h - avatarSize) / 2);
+    const avatarLabel = `bgavatar${index}`;
+    const out = `bgwithavatar${index}`;
+
+    backgroundFilters.push(
+      `[${tile.avatarInputIndex}:v]` +
+        `scale=${avatarSize}:${avatarSize}:force_original_aspect_ratio=increase:force_divisible_by=2,` +
+        `crop=${avatarSize}:${avatarSize},setsar=1` +
+        `[${avatarLabel}]`
+    );
+
+    backgroundFilters.push(
+      `[${currentBackground}][${avatarLabel}]overlay=x=${avatarX}:y=${avatarY}:eof_action=pass[${out}]`
+    );
+
+    currentBackground = out;
+  });
+
+  runFfmpeg([
+    "-y",
+    ...avatarInputs.flatMap((avatarFile) => ["-i", avatarFile]),
+    "-filter_complex",
+    backgroundFilters.join(";"),
+    "-map",
+    `[${currentBackground}]`,
+    "-frames:v",
+    "1",
+    "-update",
+    "1",
+    gridPath,
+  ]);
+
+  const labelFilters = [
+    `color=c=black@0.0:s=${WIDTH}x${HEIGHT}:r=1:d=1,format=rgba[label0]`,
+  ];
+  let currentLabel = "label0";
+
+  tiles.forEach((tile, index) => {
+    const out = `labeltile${index}`;
+    const labelH = Math.max(20, Math.round(tile.h * 0.11));
+    const labelFont = Math.max(10, Math.round(labelH * 0.46));
+
+    labelFilters.push(
+      `[${currentLabel}]` +
+        `drawbox=x=${tile.x}:y=${
+          tile.y + tile.h - labelH
+        }:w=${tile.w}:h=${labelH}:color=black@0.55:t=fill,` +
+        `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
+          displayName(tile.name)
+        )}':x=${tile.x + Math.max(8, Math.round(tile.w * 0.025))}:y=${
+          tile.y + tile.h - Math.round(labelH * 0.72)
+        }:fontsize=${labelFont}:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1` +
+        `[${out}]`
+    );
+
+    currentLabel = out;
+  });
+
+  runFfmpeg([
+    "-y",
+    "-filter_complex",
+    labelFilters.join(";"),
+    "-map",
+    `[${currentLabel}]`,
+    "-frames:v",
+    "1",
+    "-update",
+    "1",
+    labelsPath,
+  ]);
+
+  return { gridPath, labelsPath };
+}
+
+function createSceneParticipants(participants, startMs, endMs) {
+  return participants.filter((participant) => {
+    const presence = getPresence(participant);
+    return presence && presence.startMs < endMs && presence.endMs > startMs;
+  });
+}
+
+function createScenes(participants, screenShareSegments, durationMs) {
+  const points = new Set([0, Math.max(0, Math.round(durationMs))]);
+
+  participants.forEach((participant) => {
+    const presence = getPresence(participant);
+
+    if (!presence) {
+      return;
+    }
+
+    points.add(Math.max(0, Math.round(presence.startMs)));
+    points.add(Math.max(0, Math.round(presence.endMs)));
+  });
+
+  screenShareSegments.forEach((segment) => {
+    points.add(Math.max(0, Math.round(segment.offsetMs)));
+    points.add(Math.max(0, Math.round(segmentEndMs(segment))));
+  });
+
+  const sorted = [...points].sort((a, b) => a - b);
+  const scenes = [];
+
+  for (let index = 0; index < sorted.length - 1; index += 1) {
+    const startMs = sorted[index];
+    const endMs = sorted[index + 1];
+
+    if (endMs <= startMs) {
+      continue;
+    }
+
+    const activeScreens = screenShareSegments.filter((segment) =>
+      overlaps(startMs, endMs, segment)
+    );
+    const participantsInScene = createSceneParticipants(participants, startMs, endMs);
+    const kind = activeScreens.length > 0 ? "screen" : "grid";
+    const key =
+      kind === "screen"
+        ? `screen:${activeScreens.map((segment) => segment.trackId).join("|")}`
+        : `grid:${participantsInScene
+            .map((participant) => participant.participantIdentity)
+            .join("|")}`;
+    const previous = scenes[scenes.length - 1];
+
+    if (previous && previous.kind === kind && previous.key === key) {
+      previous.endMs = endMs;
+      continue;
+    }
+
+    scenes.push({
+      kind,
+      key,
+      startMs,
+      endMs,
+      participants: participantsInScene,
+      screenShareSegments: activeScreens,
+    });
+  }
+
+  return scenes;
+}
+
+function renderIntroPart(sceneDir, manifest) {
+  const outputFile = path.join(sceneDir, "part-0000.mp4");
+  const filters = [];
+  addIntroFilters(filters, manifest, "introbase");
+  filters.unshift(
+    `color=c=0x111111:s=${WIDTH}x${HEIGHT}:r=${FPS}:d=${INTRO_SECONDS}[introbase]`
+  );
+
+  const filterScript = makeFilterScript(sceneDir, "intro", filters);
+
+  runFfmpeg([
+    "-y",
+    "-filter_complex_script",
+    filterScript,
+    "-map",
+    "[vout]",
+    "-t",
+    String(INTRO_SECONDS),
+    ...encodeVideoArgs(outputFile),
+  ]);
+
+  return outputFile;
+}
+
+function renderGridScene(workdir, sceneDir, scene, sceneIndex, videoSegments) {
+  const durationSec = seconds(scene.endMs - scene.startMs);
+  const { cols, rows } = getGrid(Math.max(1, scene.participants.length));
+  const gap = GRID_GAP;
+  const cellW = Math.floor((WIDTH - gap * (cols + 1)) / cols);
+  const cellH = Math.floor((HEIGHT - gap * (rows + 1)) / rows);
+  const tiles = buildParticipantTiles(workdir, scene.participants, cellW, cellH, cols, gap);
+  const tileByIdentity = new Map(tiles.map((tile) => [tile.identity, tile]));
+  const staticAssets = buildStaticGridAssets(workdir, sceneDir, sceneIndex, tiles);
+  const sceneVideos = videoSegments
+    .filter((segment) => overlaps(scene.startMs, scene.endMs, segment))
+    .filter((segment) => tileByIdentity.has(segment.participantIdentity));
+  const inputs = [
+    "-loop",
+    "1",
+    "-i",
+    staticAssets.gridPath,
+    "-loop",
+    "1",
+    "-i",
+    staticAssets.labelsPath,
+    ...sceneVideos.flatMap((segment) => ["-i", absFile(workdir, segment)]),
+  ];
+  const filters = [`[0:v]fps=${FPS},scale=${WIDTH}:${HEIGHT},setsar=1[base]`];
+  let current = "base";
+
+  sceneVideos.forEach((segment, index) => {
+    const inputIndex = 2 + index;
+    const tile = tileByIdentity.get(segment.participantIdentity);
+    const startMs = Math.max(scene.startMs, segment.offsetMs);
+    const endMs = Math.min(scene.endMs, segmentEndMs(segment));
+    const sourceStartSec = seconds(startMs - segment.offsetMs);
+    const duration = seconds(endMs - startMs);
+    const delay = seconds(startMs - scene.startMs);
+    const scaled = `v${index}`;
+    const out = `tmp${index}`;
+
+    filters.push(
+      `[${inputIndex}:v]` +
+        `trim=start=${sourceStartSec}:duration=${duration},` +
+        `setpts=PTS-STARTPTS+${delay}/TB,` +
+        `scale=${tile.w}:${tile.h}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
+        `setsar=1,` +
+        `pad=${tile.w}:${tile.h}:(ow-iw)/2:(oh-ih)/2:color=black` +
+        `[${scaled}]`
+    );
+
+    filters.push(
+      `[${current}][${scaled}]` +
+        `overlay=x=${tile.x}:y=${tile.y}:eof_action=pass:enable='between(t,${delay},${
+          delay + duration
+        })'` +
+        `[${out}]`
+    );
+
+    current = out;
+  });
+
+  filters.push(`[1:v]fps=${FPS},format=rgba[labels]`);
+  filters.push(`[${current}][labels]overlay=x=0:y=0:eof_action=pass[vout]`);
+
+  const filterScript = makeFilterScript(sceneDir, `scene-${sceneIndex}`, filters);
+  const outputFile = path.join(
+    sceneDir,
+    `part-${String(sceneIndex + 1).padStart(4, "0")}.mp4`
+  );
+
+  runFfmpeg([
+    "-y",
+    ...inputs,
+    "-filter_complex_script",
+    filterScript,
+    "-map",
+    "[vout]",
+    "-t",
+    String(durationSec),
+    ...encodeVideoArgs(outputFile),
+  ]);
+
+  return outputFile;
+}
+
+function renderScreenScene(workdir, sceneDir, scene, sceneIndex) {
+  const durationSec = seconds(scene.endMs - scene.startMs);
+  const segment = scene.screenShareSegments[0];
+  const startMs = Math.max(scene.startMs, segment.offsetMs);
+  const sourceStartSec = seconds(startMs - segment.offsetMs);
+  const filters = [
+    `[0:v]trim=start=${sourceStartSec}:duration=${durationSec},` +
+      `setpts=PTS-STARTPTS,` +
+      `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
+      `setsar=1[ss]`,
+    `[ss]pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black[vout]`,
+  ];
+  const filterScript = makeFilterScript(sceneDir, `scene-${sceneIndex}`, filters);
+  const outputFile = path.join(
+    sceneDir,
+    `part-${String(sceneIndex + 1).padStart(4, "0")}.mp4`
+  );
+
+  runFfmpeg([
+    "-y",
+    "-i",
+    absFile(workdir, segment),
+    "-filter_complex_script",
+    filterScript,
+    "-map",
+    "[vout]",
+    "-t",
+    String(durationSec),
+    ...encodeVideoArgs(outputFile),
+  ]);
+
+  return outputFile;
+}
+
+function renderAudio(workdir, sceneDir, audioSegments, outputDurationSec) {
+  const outputFile = path.join(sceneDir, "audio.m4a");
+  const filters = [
+    `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:${outputDurationSec},asetpts=PTS-STARTPTS[silence]`,
+  ];
+  const inputs = [];
+  const labels = ["silence"];
+
+  audioSegments.forEach((segment, index) => {
+    const inputIndex = index;
+    const delayMs = Math.max(0, Math.round(segment.offsetMs + INTRO_SECONDS * 1000));
+    const label = `a${index}`;
+
+    inputs.push("-i", absFile(workdir, segment));
+    filters.push(
+      `[${inputIndex}:a]asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[${label}]`
+    );
+    labels.push(label);
+  });
+
+  filters.push(
+    `${labels.map((label) => `[${label}]`).join("")}` +
+      `amix=inputs=${labels.length}:duration=longest:normalize=0,` +
+      `atrim=0:${outputDurationSec},asetpts=PTS-STARTPTS[aout]`
+  );
+
+  const filterScript = makeFilterScript(sceneDir, "audio", filters);
+
+  runFfmpeg([
+    "-y",
+    ...inputs,
+    "-filter_complex_script",
+    filterScript,
+    "-map",
+    "[aout]",
+    "-c:a",
+    "aac",
+    "-b:a",
+    AUDIO_BITRATE,
+    outputFile,
+  ]);
+
+  return outputFile;
+}
+
+function concatVideoParts(sceneDir, parts) {
+  const listPath = path.join(sceneDir, CONCAT_FILE);
+  const outputFile = path.join(sceneDir, "video-only.mp4");
+
+  fs.writeFileSync(
+    listPath,
+    parts.map((part) => `file '${ffconcatPath(part)}'`).join("\n") + "\n",
+    "utf8"
+  );
+
+  runFfmpeg([
+    "-y",
+    "-f",
+    "concat",
+    "-safe",
+    "0",
+    "-i",
+    listPath,
+    "-c",
+    "copy",
+    outputFile,
+  ]);
+
+  return outputFile;
+}
+
+function muxFinal(videoFile, audioFile, finalOutput) {
+  runFfmpeg([
+    "-y",
+    "-i",
+    videoFile,
+    "-i",
+    audioFile,
+    "-map",
+    "0:v:0",
+    "-map",
+    "1:a:0",
+    "-c:v",
+    "copy",
+    "-c:a",
+    "copy",
+    "-shortest",
+    finalOutput,
+  ]);
+}
+
+function main(workdir) {
+  const manifestPath = getManifestPath(workdir);
+  const outputDir = getOutputDir(workdir);
+  const sceneDir = getDynamicDir(workdir);
+  const finalOutput = getFinalDynamicPath(workdir);
+
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error("manifest.json nao encontrado, rode generate-manifest primeiro");
+  }
+
+  assertFfmpegAvailable();
+  ensureDir(outputDir);
+  ensureDir(sceneDir);
+
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const manifestParticipants = getManifestParticipants(manifest);
+  const participants = manifestParticipants
+    .filter((participant) => getPresence(participant))
+    .slice(0, MAX_VIDEOS);
+  const videoSegments = [];
+
+  participants.forEach((participant) => {
+    participant.videoSegments.forEach((segment) => {
+      videoSegments.push({
+        ...segment,
+        participantIdentity: participant.participantIdentity,
+      });
+    });
+  });
+
+  const audioSegments = manifestParticipants.flatMap(
+    (participant) => participant.audioSegments || []
+  );
+  const screenShareSegments = participants
+    .flatMap((participant) => participant.screenShareSegments || [])
+    .sort((a, b) => a.offsetMs - b.offsetMs);
+
+  if (videoSegments.length === 0 && screenShareSegments.length === 0) {
+    throw new Error("Nenhum video encontrado no manifest.");
+  }
+
+  const outputDurationSec = manifest.durationMs / 1000 + INTRO_SECONDS;
+  const scenes = createScenes(participants, screenShareSegments, manifest.durationMs);
+  const parts = [];
+
+  console.log(`Cenas: ${scenes.length}`);
+  console.log(`Video bitrate: ${VIDEO_BITRATE}`);
+  console.log(`Audio bitrate: ${AUDIO_BITRATE}`);
+
+  console.log("Gerando audio final...");
+  const audioFile = renderAudio(workdir, sceneDir, audioSegments, outputDurationSec);
+
+  console.log("Gerando intro...");
+  parts.push(renderIntroPart(sceneDir, manifest));
+
+  scenes.forEach((scene, index) => {
+    const label = `${String(index + 1).padStart(4, "0")} ${scene.kind} ${seconds(
+      scene.endMs - scene.startMs
+    ).toFixed(3)}s`;
+    console.log(`Gerando cena ${label}...`);
+
+    if (scene.kind === "screen") {
+      parts.push(renderScreenScene(workdir, sceneDir, scene, index));
+    } else {
+      parts.push(renderGridScene(workdir, sceneDir, scene, index, videoSegments));
+    }
+  });
+
+  console.log("Concatenando cenas...");
+  const videoFile = concatVideoParts(sceneDir, parts);
+
+  console.log("Muxando audio final...");
+  muxFinal(videoFile, audioFile, finalOutput);
+
+  console.log("");
+  console.log("Video gerado:");
+  console.log(finalOutput);
+}
+
+runCli(main, "render-dynamic-scenes.js");
