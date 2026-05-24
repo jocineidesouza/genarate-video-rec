@@ -13,7 +13,11 @@ const WIDTH = 854;
 const HEIGHT = 480;
 const FPS = 8;
 const MAX_VIDEOS = 16;
-const FONT_FILE = "C\\:/Windows/Fonts/arial.ttf";
+const FONT_FILE =
+  process.env.FONT_FILE ||
+  (process.platform === "win32"
+    ? "C\\:/Windows/Fonts/arial.ttf"
+    : "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
 const INTRO_SECONDS = 2;
 const VIDEO_PRESET = "ultrafast";
 const VIDEO_BITRATE = "200k";
@@ -41,12 +45,11 @@ function runFfmpeg(args) {
   const result = spawnSync("ffmpeg", args, { stdio: "inherit" });
 
   if (result.error) {
-    console.error(`Erro ao executar FFmpeg: ${result.error.message}`);
-    process.exit(1);
+    throw new Error(`Erro ao executar FFmpeg: ${result.error.message}`);
   }
 
   if (result.status !== 0) {
-    process.exit(result.status || 1);
+    throw new Error(`FFmpeg finalizou com status ${result.status || 1}`);
   }
 }
 
@@ -836,11 +839,11 @@ function muxFinal(videoFile, audioFile, finalOutput) {
   ]);
 }
 
-function main(workdir) {
-  const manifestPath = getManifestPath(workdir);
+function main(workdir, options = {}) {
+  const manifestPath = options.manifestPath || getManifestPath(workdir);
   const outputDir = getOutputDir(workdir);
   const sceneDir = getDynamicDir(workdir);
-  const finalOutput = getFinalDynamicPath(workdir);
+  const finalOutput = options.finalOutput || getFinalDynamicPath(workdir);
 
   if (!fs.existsSync(manifestPath)) {
     throw new Error("manifest.json nao encontrado, rode generate-manifest primeiro");
@@ -913,6 +916,15 @@ function main(workdir) {
   console.log("");
   console.log("Video gerado:");
   console.log(finalOutput);
+
+  return finalOutput;
 }
 
-runCli(main, "render-dynamic-scenes.js");
+if (require.main === module) {
+  runCli(main, "render-dynamic-scenes.js");
+}
+
+module.exports = {
+  getFinalDynamicPath,
+  main,
+};
