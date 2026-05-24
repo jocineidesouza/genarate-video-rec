@@ -1,0 +1,62 @@
+{
+  "connect-dev": {
+    "product": "connect",
+    "projectId": "ellevo-connect-dev",
+    "region": "us-central1",
+    "appEnv": "dev",
+    "topicName": "talk-events",
+    "bucketName": "ellevo-connect-dev.firebasestorage.app",
+    "functionName": "talkEventConsumer",
+    "functionServiceAccount": "217509474833-compute@developer.gserviceaccount.com"
+  },
+  "connect-stage": {
+    "product": "connect",
+    "projectId": "ellevo-connect-stg",
+    "region": "us-central1",
+    "appEnv": "stg",
+    "topicName": "talk-events",
+    "bucketName": "ellevo-connect-stg.firebasestorage.app",
+    "functionName": "talkEventConsumer",
+    "functionServiceAccount": "1055897329165-compute@developer.gserviceaccount.com"
+  },
+  "connect-prod": {
+    "product": "connect",
+    "projectId": "ellevo-connect",
+    "region": "us-central1",
+    "appEnv": "prod",
+    "topicName": "talk-events",
+    "bucketName": "ellevo-connect.firebasestorage.app",
+    "functionName": "talkEventConsumer",
+    "functionServiceAccount": "715448501451-compute@developer.gserviceaccount.com"
+  },
+  "talk-dev": {
+    "product": "talk",
+    "projectId": "dev-atendo",
+    "region": "us-central1",
+    "appEnv": "dev",
+    "topicName": "talk-events",
+    "bucketName": "dev-atendo.appspot.com",
+    "functionName": "talkEventConsumer",
+    "functionServiceAccount": "898951642387-compute@developer.gserviceaccount.com"
+  },
+  "talk-stage": {
+    "product": "talk",
+    "projectId": "stage-atendo",
+    "region": "us-central1",
+    "appEnv": "stg",
+    "topicName": "talk-events",
+    "bucketName": "stage-atendo.appspot.com",
+    "functionName": "talkEventConsumer",
+    "functionServiceAccount": "125883216033-compute@developer.gserviceaccount.com"
+  },
+  "talk-prod": {
+    "product": "talk",
+    "projectId": "atendo-global",
+    "region": "us-central1",
+    "appEnv": "prd",
+    "topicName": "talk-events",
+    "bucketName": "atendo-global.appspot.com",
+    "functionName": "talkEventConsumer",
+    "functionServiceAccount": "224278434566-compute@developer.gserviceaccount.com"
+  }
+}
