@@ -497,8 +497,12 @@ function main(workdir) {
     .flatMap((participant) => participant.screenShareSegments || [])
     .sort((a, b) => a.offsetMs - b.offsetMs);
 
-  if (videoSegments.length === 0 && screenShareSegments.length === 0) {
-    throw new Error("Nenhum video encontrado no manifest.");
+  if (
+    videoSegments.length === 0 &&
+    screenShareSegments.length === 0 &&
+    audioSegments.length === 0
+  ) {
+    throw new Error("Nenhum audio, video ou screen share encontrado no manifest.");
   }
 
   const { cols, rows } = getGrid(Math.max(1, videoParticipants.length));
