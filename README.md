@@ -96,6 +96,10 @@ recording-123/
     final-grid.mp4
 ```
 
+Quando o fluxo de renderizacao dinamica estiver em uso, o video final passa a usar um nome
+baseado na edicao e no timestamp, por exemplo `talk_260624_090259.mp4` ou
+`ellevo_connect_260624_090259.mp4`.
+
 ## Gerar o manifest
 
 Use um path absoluto ou relativo para a pasta da gravação.

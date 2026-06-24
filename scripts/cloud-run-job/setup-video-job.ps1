@@ -372,7 +372,8 @@ function Ensure-CloudRunJob {
     [Parameter(Mandatory = $true)][string]$ImageUri,
     [Parameter(Mandatory = $true)][string]$ServiceAccountEmail,
     [Parameter(Mandatory = $true)][string]$TopicName,
-    [Parameter(Mandatory = $true)][string]$AppEnv
+    [Parameter(Mandatory = $true)][string]$AppEnv,
+    [Parameter(Mandatory = $true)][string]$VideoEdition
   )
 
   $commonArgs = @(
@@ -395,7 +396,7 @@ function Ensure-CloudRunJob {
     '--tasks',
     '1',
     '--set-env-vars',
-    "TOPIC_NAME=$TopicName,APP_ENV=$AppEnv"
+    "TOPIC_NAME=$TopicName,APP_ENV=$AppEnv,VIDEO_EDITION=$VideoEdition"
   )
 
   # Atualiza o Job quando existir e cria quando ainda nao existir.
@@ -467,7 +468,7 @@ function Execute-TestJob {
 
 $config = Read-EnvironmentConfig -Path $ConfigPath -Name $Environment
 
-foreach ($field in @('projectId', 'region', 'appEnv', 'topicName', 'bucketName', 'functionServiceAccount')) {
+foreach ($field in @('projectId', 'region', 'appEnv', 'product', 'topicName', 'bucketName', 'functionServiceAccount')) {
   Assert-ConfigField -Config $config -Name $field
 }
 
@@ -480,6 +481,7 @@ $region = [string]$config.region
 $topicName = [string]$config.topicName
 $bucketName = [string]$config.bucketName
 $appEnv = [string]$config.appEnv
+$videoEdition = [string]$config.product
 $functionServiceAccount = [string]$config.functionServiceAccount
 $jobServiceAccount = "$ServiceAccountId@$projectId.iam.gserviceaccount.com"
 $imageUri = "$region-docker.pkg.dev/$projectId/$RepositoryName/$ImageName`:latest"
@@ -519,7 +521,8 @@ Ensure-CloudRunJob `
   -ImageUri $imageUri `
   -ServiceAccountEmail $jobServiceAccount `
   -TopicName $topicName `
-  -AppEnv $appEnv
+  -AppEnv $appEnv `
+  -VideoEdition $videoEdition
 
 Write-Step "Aplicando permissao Cloud Run Invoker para a Function"
 Add-CloudRunInvoker -ProjectId $projectId -Region $region -FunctionServiceAccount $functionServiceAccount

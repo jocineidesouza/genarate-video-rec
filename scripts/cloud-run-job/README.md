@@ -49,6 +49,7 @@ Campos principais:
 - `projectId`: projeto Google Cloud/Firebase.
 - `region`: regiao do Cloud Run Job e da Function, hoje `us-central1`.
 - `appEnv`: valor passado ao container em `APP_ENV`.
+- `product`: valor passado ao container em `VIDEO_EDITION`, usado para nomear o arquivo final.
 - `topicName`: topico Pub/Sub usado pelo pipeline, hoje `talk-events`.
 - `bucketName`: bucket do Firebase Storage sem `gs://`.
 - `functionName`: nome da Firebase Function Gen2 que deve invocar o Job.
@@ -183,7 +184,7 @@ O script configura o Job com:
 - Timeout: `3600s`
 - Max retries: `1`
 - Tasks: `1`
-- Env vars: `TOPIC_NAME`, `APP_ENV`
+- Env vars: `TOPIC_NAME`, `APP_ENV`, `VIDEO_EDITION`
 
 ## Ver logs
 

@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { buildFinalVideoFileName } = require("./video-naming");
 
 function getOutputDir(workdir) {
   return path.join(workdir, "output");
@@ -11,6 +12,10 @@ function getManifestPath(workdir) {
 
 function getFinalGridPath(workdir) {
   return path.join(getOutputDir(workdir), "final-grid.mp4");
+}
+
+function getFinalDynamicPath(workdir, options = {}) {
+  return path.join(getOutputDir(workdir), buildFinalVideoFileName(options));
 }
 
 function ensureDir(dir) {
@@ -36,6 +41,7 @@ function isInsideOutput(workdir, targetPath) {
 
 module.exports = {
   ensureDir,
+  getFinalDynamicPath,
   getFinalGridPath,
   getManifestPath,
   getOutputDir,

@@ -4,10 +4,12 @@ const { spawnSync } = require("child_process");
 const { runCli } = require("./src/cli");
 const {
   ensureDir,
+  getFinalDynamicPath,
   getManifestPath,
   getOutputDir,
   resolveWorkdirRelative,
 } = require("./src/paths");
+const { resolveVideoEdition } = require("./src/video-naming");
 
 const WIDTH = 854;
 const HEIGHT = 480;
@@ -30,7 +32,6 @@ const AVATAR_CIRCLE = "\u25CF";
 const SCENES_DIR = "dynamic-scenes";
 const FILTER_FILE = "filter.txt";
 const CONCAT_FILE = "concat-list.txt";
-const FINAL_FILE = "final-dynamic-scenes.mp4";
 
 function getGrid(count) {
   if (count <= 1) return { cols: 1, rows: 1 };
@@ -368,10 +369,6 @@ function seconds(ms) {
 
 function getDynamicDir(workdir) {
   return path.join(getOutputDir(workdir), SCENES_DIR);
-}
-
-function getFinalDynamicPath(workdir) {
-  return path.join(getOutputDir(workdir), FINAL_FILE);
 }
 
 function makeFilterScript(dir, name, filters) {
@@ -846,7 +843,18 @@ function main(workdir, options = {}) {
   const manifestPath = options.manifestPath || getManifestPath(workdir);
   const outputDir = getOutputDir(workdir);
   const sceneDir = getDynamicDir(workdir);
-  const finalOutput = options.finalOutput || getFinalDynamicPath(workdir);
+  const finalOutput =
+    options.finalOutput ||
+    getFinalDynamicPath(workdir, {
+      edition: resolveVideoEdition({
+        edition: options.edition || process.env.VIDEO_EDITION,
+        product: options.product || process.env.PRODUCT,
+        appEnv: options.appEnv || process.env.APP_ENV,
+      }),
+      title: options.title,
+      includeTitle: Boolean(options.includeTitle),
+      timestamp: options.timestamp,
+    });
 
   if (!fs.existsSync(manifestPath)) {
     throw new Error("manifest.json nao encontrado, rode generate-manifest primeiro");

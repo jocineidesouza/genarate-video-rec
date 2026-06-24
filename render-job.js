@@ -4,9 +4,9 @@ const path = require("path");
 const admin = require("firebase-admin");
 const { PubSub } = require("@google-cloud/pubsub");
 const { main: renderDynamicScenes, getFinalDynamicPath } = require("./render-dynamic-scenes");
+const { resolveVideoEdition } = require("./src/video-naming");
 
 const TOPIC_NAME = "talk-events";
-const FINAL_FILE = "final-dynamic-scenes.mp4";
 
 function normalizeText(value) {
   return String(value || "").trim();
@@ -63,7 +63,6 @@ function resolveRecordingStorage(indexData) {
     bucketName,
     storagePrefix,
     manifestStoragePath: `${storagePrefix}manifest.json`,
-    finalStoragePath: `${storagePrefix}${FINAL_FILE}`,
   };
 }
 
@@ -136,6 +135,7 @@ async function publishVideoGeneratedEvent(pubsub, { recId, file, status, errorMe
 
 async function main() {
   const recId = normalizeText(process.env.RECORDING_ID);
+  const jobStartedAt = new Date();
   let indexData = null;
   const pubsub = new PubSub();
 
@@ -150,12 +150,20 @@ async function main() {
     const storage = admin.storage();
 
     indexData = await loadRecordingIndex(db, recId);
-    const { bucketName, storagePrefix, manifestStoragePath, finalStoragePath } =
-      resolveRecordingStorage(indexData);
+    const { bucketName, storagePrefix, manifestStoragePath } = resolveRecordingStorage(indexData);
     const bucket = storage.bucket(bucketName);
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), `render-${recId}-`));
     const manifestPath = path.join(workdir, "manifest.json");
-    const finalOutput = getFinalDynamicPath(workdir);
+    const edition = resolveVideoEdition({
+      edition: process.env.VIDEO_EDITION,
+      product: indexData?.product,
+      appEnv: process.env.APP_ENV,
+    });
+    const finalOutput = getFinalDynamicPath(workdir, {
+      edition,
+      timestamp: jobStartedAt,
+    });
+    const finalStoragePath = `${storagePrefix}${path.basename(finalOutput)}`;
 
     console.log(`Recording: ${recId}`);
     console.log(`Bucket: ${bucketName}`);
@@ -172,6 +180,8 @@ async function main() {
     renderDynamicScenes(workdir, {
       manifestPath,
       finalOutput,
+      edition,
+      timestamp: jobStartedAt,
     });
 
     await uploadFinalVideo(bucket, finalOutput, finalStoragePath, recId);

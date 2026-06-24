@@ -50,6 +50,7 @@ $requiredFields = @(
   'projectId',
   'region',
   'appEnv',
+  'product',
   'topicName',
   'bucketName',
   'functionServiceAccount'
@@ -74,6 +75,7 @@ Write-Host "Ambiente '$Environment' valido." -ForegroundColor Green
 Write-Host "Project: $($config.projectId)"
 Write-Host "Region: $($config.region)"
 Write-Host "APP_ENV: $($config.appEnv)"
+Write-Host "Product: $($config.product)"
 Write-Host "Topic: $($config.topicName)"
 Write-Host "Bucket: $($config.bucketName)"
 Write-Host "Function service account: $($config.functionServiceAccount)"
