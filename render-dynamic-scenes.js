@@ -608,8 +608,11 @@ function createScenes(participants, screenShareSegments, durationMs) {
   return scenes;
 }
 
-function renderIntroPart(sceneDir, manifest) {
-  const outputFile = path.join(sceneDir, "part-0000.mp4");
+function renderIntroPart(
+  sceneDir,
+  manifest,
+  outputFile = path.join(sceneDir, "part-0000.mp4")
+) {
   const filters = [];
   addIntroFilters(filters, manifest, "introbase");
   filters.unshift(
@@ -876,12 +879,18 @@ function main(workdir, options = {}) {
     .flatMap((participant) => participant.screenShareSegments || [])
     .sort((a, b) => a.offsetMs - b.offsetMs);
 
-  if (
-    videoSegments.length === 0 &&
-    screenShareSegments.length === 0 &&
-    audioSegments.length === 0
-  ) {
-    throw new Error("Nenhum audio, video ou screen share encontrado no manifest.");
+  const hasUsefulMedia =
+    videoSegments.length > 0 ||
+    screenShareSegments.length > 0 ||
+    audioSegments.length > 0;
+
+  if (!hasUsefulMedia) {
+    console.log("Nenhuma midia util no manifest. Gerando fallback intro-only...");
+    renderIntroPart(sceneDir, manifest, finalOutput);
+    console.log("");
+    console.log("Video gerado:");
+    console.log(finalOutput);
+    return finalOutput;
   }
 
   const outputDurationSec = manifest.durationMs / 1000 + INTRO_SECONDS;

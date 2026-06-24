@@ -325,6 +325,31 @@ function addIntroFilters(filters, manifest, baseLabel) {
   filters.push(`[${baseLabel}][intro]overlay=x=0:y=0:eof_action=pass[vout]`);
 }
 
+function renderIntroOnly(workdir, manifest, finalOutput) {
+  const outputDir = getOutputDir(workdir);
+  const filters = [];
+
+  filters.unshift(
+    `color=c=0x111111:s=${WIDTH}x${HEIGHT}:r=${FPS}:d=${INTRO_SECONDS}[introbase]`
+  );
+  addIntroFilters(filters, manifest, "introbase");
+
+  const filterScript = makeFilterScript(outputDir, "intro-only", filters);
+
+  runFfmpeg([
+    "-y",
+    "-filter_complex_script",
+    filterScript,
+    "-map",
+    "[vout]",
+    "-t",
+    String(INTRO_SECONDS),
+    ...encodeVideoArgs(finalOutput),
+  ]);
+
+  return finalOutput;
+}
+
 function runFfmpeg(args) {
   const result = spawnSync("ffmpeg", args, {
     stdio: "inherit",
@@ -497,12 +522,18 @@ function main(workdir) {
     .flatMap((participant) => participant.screenShareSegments || [])
     .sort((a, b) => a.offsetMs - b.offsetMs);
 
-  if (
-    videoSegments.length === 0 &&
-    screenShareSegments.length === 0 &&
-    audioSegments.length === 0
-  ) {
-    throw new Error("Nenhum audio, video ou screen share encontrado no manifest.");
+  const hasUsefulMedia =
+    videoSegments.length > 0 ||
+    screenShareSegments.length > 0 ||
+    audioSegments.length > 0;
+
+  if (!hasUsefulMedia) {
+    console.log("Nenhuma midia util no manifest. Gerando fallback intro-only...");
+    renderIntroOnly(workdir, manifest, finalOutput);
+    console.log("");
+    console.log("Video gerado:");
+    console.log(finalOutput);
+    return finalOutput;
   }
 
   const { cols, rows } = getGrid(Math.max(1, videoParticipants.length));
