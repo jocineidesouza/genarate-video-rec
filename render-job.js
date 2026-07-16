@@ -3,7 +3,8 @@ const os = require("os");
 const path = require("path");
 const admin = require("firebase-admin");
 const { PubSub } = require("@google-cloud/pubsub");
-const { main: renderDynamicScenes, getFinalDynamicPath } = require("./render-dynamic-scenes");
+const { execFileSync } = require("node:child_process");
+const { main: renderDynamicScenes } = require("./render-dynamic-scenes");
 const { resolveVideoEdition } = require("./src/video-naming");
 
 const TOPIC_NAME = "talk-events";
@@ -37,6 +38,33 @@ function relativeObjectName(objectName, prefix) {
   return objectName.slice(prefix.length).replace(/^\/+/, "");
 }
 
+function getRenderExecutionId() {
+  return normalizeText(process.env.RENDER_EXECUTION_ID) || `render-${Date.now()}`;
+}
+
+function measureVideoDurationMs(localFile) {
+  const output = execFileSync(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      localFile,
+    ],
+    { encoding: "utf8" }
+  ).trim();
+  const durationSeconds = Number(output);
+
+  if (!Number.isFinite(durationSeconds) || durationSeconds < 0) {
+    throw new Error(`Duracao invalida no video final: ${output}`);
+  }
+
+  return Math.round(durationSeconds * 1000);
+}
+
 async function loadRecordingIndex(db, recId) {
   const snap = await db.doc(`LIVEKIT_EGRESS_INDEX/${recId}`).get();
 
@@ -47,7 +75,7 @@ async function loadRecordingIndex(db, recId) {
   return snap.data() || {};
 }
 
-function resolveRecordingStorage(indexData) {
+function resolveRecordingStorage(indexData, recId) {
   const bucketName = normalizeBucketName(indexData.bucketName || indexData.storageBucket);
   const storagePrefix = normalizeStoragePrefix(indexData.filepath || indexData.outputPrefix);
 
@@ -59,10 +87,33 @@ function resolveRecordingStorage(indexData) {
     throw new Error("Prefixo da gravacao nao encontrado em LIVEKIT_EGRESS_INDEX");
   }
 
+  if (normalizeText(indexData.mode) !== "track") {
+    throw new Error("A gravacao nao esta no modo track");
+  }
+
+  if (normalizeText(indexData.manifestStatus) !== "ready") {
+    throw new Error("O manifesto da gravacao ainda nao esta pronto");
+  }
+
+  const manifestSegments = `${storagePrefix}manifest.json`.split("/").filter(Boolean);
+  const [vertical, slug, feature, artifactType, entityId, artifactId, fileName] = manifestSegments;
+  const callSessionId = normalizeText(indexData.callSessionId || indexData.call_session_id);
+  if (
+    feature !== "call" ||
+    artifactType !== "recordings" ||
+    entityId !== callSessionId ||
+    artifactId !== recId ||
+    fileName !== "manifest.json"
+  ) {
+    throw new Error("Prefixo da gravacao nao corresponde ao indice canonico");
+  }
+
   return {
     bucketName,
     storagePrefix,
     manifestStoragePath: `${storagePrefix}manifest.json`,
+    vertical,
+    slug,
   };
 }
 
@@ -76,7 +127,7 @@ async function downloadRecordingPrefix(bucket, storagePrefix, workdir) {
 
   for (const file of realFiles) {
     const relative = relativeObjectName(file.name, storagePrefix);
-    if (!relative) continue;
+    if (!relative || relative === "final.mp4") continue;
 
     const destination = path.join(workdir, ...relative.split("/"));
     fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -85,25 +136,50 @@ async function downloadRecordingPrefix(bucket, storagePrefix, workdir) {
   }
 }
 
-async function uploadFinalVideo(bucket, localFile, finalStoragePath, recId) {
+async function uploadFinalVideo(bucket, localFile, finalStoragePath, { recId, indexData }) {
   if (!fs.existsSync(localFile)) {
     throw new Error(`Video final nao encontrado: ${localFile}`);
   }
 
+  const videoSizeBytes = fs.statSync(localFile).size;
   await bucket.upload(localFile, {
     destination: finalStoragePath,
     metadata: {
       contentType: "video/mp4",
       metadata: {
         recId,
-        type: "track-recording-render",
+        vertical: normalizeText(indexData?.vertical),
+        slug: normalizeText(indexData?.slug),
+        feature: "call",
+        artifactType: "recordings",
+        entityId: normalizeText(indexData?.callSessionId || indexData?.call_session_id),
+        artifactId: recId,
+        producer: "recording-render-job",
+        objectRole: "rendered-video",
       },
     },
     resumable: false,
   });
+
+  return videoSizeBytes;
 }
 
-async function publishVideoGeneratedEvent(pubsub, { recId, file, status, errorMessage, indexData }) {
+async function publishVideoGeneratedEvent(
+  pubsub,
+  {
+    recId,
+    file,
+    status,
+    errorMessage,
+    indexData,
+    renderExecutionId,
+    renderStartedAt,
+    renderFinishedAt,
+    renderDurationMs,
+    videoDurationMs,
+    videoSizeBytes,
+  }
+) {
   const eventStatus = Number(status) === 200 ? 200 : 500;
   const event = {
     eventId:
@@ -120,6 +196,12 @@ async function publishVideoGeneratedEvent(pubsub, { recId, file, status, errorMe
       file: file || null,
       status: eventStatus,
       errorMessage: errorMessage || null,
+      renderExecutionId: renderExecutionId || null,
+      renderStartedAt: renderStartedAt || null,
+      renderFinishedAt: renderFinishedAt || null,
+      renderDurationMs: Number.isFinite(renderDurationMs) ? renderDurationMs : null,
+      videoDurationMs: Number.isFinite(videoDurationMs) ? videoDurationMs : null,
+      videoSizeBytes: Number.isFinite(videoSizeBytes) ? videoSizeBytes : null,
     },
     receivedAt: new Date().toISOString(),
   };
@@ -135,6 +217,7 @@ async function publishVideoGeneratedEvent(pubsub, { recId, file, status, errorMe
 
 async function main() {
   const recId = normalizeText(process.env.RECORDING_ID);
+  const renderExecutionId = getRenderExecutionId();
   const jobStartedAt = new Date();
   let indexData = null;
   const pubsub = new PubSub();
@@ -150,7 +233,7 @@ async function main() {
     const storage = admin.storage();
 
     indexData = await loadRecordingIndex(db, recId);
-    const { bucketName, storagePrefix, manifestStoragePath } = resolveRecordingStorage(indexData);
+    const { bucketName, storagePrefix, manifestStoragePath } = resolveRecordingStorage(indexData, recId);
     const bucket = storage.bucket(bucketName);
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), `render-${recId}-`));
     const manifestPath = path.join(workdir, "manifest.json");
@@ -159,11 +242,8 @@ async function main() {
       product: indexData?.product,
       appEnv: process.env.APP_ENV,
     });
-    const finalOutput = getFinalDynamicPath(workdir, {
-      edition,
-      timestamp: jobStartedAt,
-    });
-    const finalStoragePath = `${storagePrefix}${path.basename(finalOutput)}`;
+    const finalOutput = path.join(workdir, "final.mp4");
+    const finalStoragePath = `${storagePrefix}final.mp4`;
 
     console.log(`Recording: ${recId}`);
     console.log(`Bucket: ${bucketName}`);
@@ -184,13 +264,24 @@ async function main() {
       timestamp: jobStartedAt,
     });
 
-    await uploadFinalVideo(bucket, finalOutput, finalStoragePath, recId);
+    const videoDurationMs = measureVideoDurationMs(finalOutput);
+    const videoSizeBytes = await uploadFinalVideo(bucket, finalOutput, finalStoragePath, {
+      recId,
+      indexData,
+    });
+    const renderFinishedAt = new Date();
     await publishVideoGeneratedEvent(pubsub, {
       recId,
       file: finalStoragePath,
       status: 200,
       errorMessage: null,
       indexData,
+      renderExecutionId,
+      renderStartedAt: jobStartedAt.toISOString(),
+      renderFinishedAt: renderFinishedAt.toISOString(),
+      renderDurationMs: renderFinishedAt.getTime() - jobStartedAt.getTime(),
+      videoDurationMs,
+      videoSizeBytes,
     });
 
     console.log(`Video final enviado: ${finalStoragePath}`);
@@ -204,6 +295,10 @@ async function main() {
         status: 500,
         errorMessage: error.message || String(error),
         indexData,
+        renderExecutionId,
+        renderStartedAt: jobStartedAt.toISOString(),
+        renderFinishedAt: new Date().toISOString(),
+        renderDurationMs: Date.now() - jobStartedAt.getTime(),
       });
     } catch (publishError) {
       console.error(`Falha ao publicar evento de erro: ${publishError.message || publishError}`);
