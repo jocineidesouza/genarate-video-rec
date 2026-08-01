@@ -142,6 +142,8 @@ async function uploadFinalVideo(bucket, localFile, finalStoragePath, { recId, in
   }
 
   const videoSizeBytes = fs.statSync(localFile).size;
+  const callSessionId = normalizeText(indexData?.callSessionId || indexData?.call_session_id);
+  const roomId = normalizeText(indexData?.roomId || indexData?.room_id);
   await bucket.upload(localFile, {
     destination: finalStoragePath,
     metadata: {
@@ -152,10 +154,13 @@ async function uploadFinalVideo(bucket, localFile, finalStoragePath, { recId, in
         slug: normalizeText(indexData?.slug),
         feature: "call",
         artifactType: "recordings",
-        entityId: normalizeText(indexData?.callSessionId || indexData?.call_session_id),
+        entityId: callSessionId,
         artifactId: recId,
         producer: "recording-render-job",
         objectRole: "rendered-video",
+        callSessionId,
+        recordingId: recId,
+        ...(roomId ? { roomId } : {}),
       },
     },
     resumable: false,
