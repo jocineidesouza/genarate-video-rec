@@ -308,18 +308,18 @@ function addIntroFilters(filters, manifest, baseLabel) {
     `[${current}]` +
       `drawtext=fontfile='${FONT_FILE}':text='Recorded by':x=${scaleX(
         132
-      )}:y=${scaleY(760)}:fontsize=${font(15)}:fontcolor=white@0.55,` +
+      )}:y=${scaleY(700)}:fontsize=${font(15)}:fontcolor=white@0.55,` +
       `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
-        truncate(metadata.recorderBy, 38)
-      )}':x=${scaleX(132)}:y=${scaleY(788)}:fontsize=${font(
+        metadata.recorderBy
+      )}':x=${scaleX(132)}:y=${scaleY(730)}:fontsize=${font(
         27
       )}:fontcolor=white@0.92,` +
       `drawtext=fontfile='${FONT_FILE}':text='Organized by':x=${scaleX(
-        520
-      )}:y=${scaleY(760)}:fontsize=${font(15)}:fontcolor=white@0.55,` +
+        132
+      )}:y=${scaleY(820)}:fontsize=${font(15)}:fontcolor=white@0.55,` +
       `drawtext=fontfile='${FONT_FILE}':text='${escapeDrawtext(
-        truncate(metadata.organizedBy, 38)
-      )}':x=${scaleX(520)}:y=${scaleY(788)}:fontsize=${font(
+        metadata.organizedBy
+      )}':x=${scaleX(132)}:y=${scaleY(850)}:fontsize=${font(
         27
       )}:fontcolor=white@0.92` +
       `[intro]`
