@@ -24,8 +24,8 @@ const FONT_FILE =
     : "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
 const INTRO_SECONDS = 2;
 const VIDEO_PRESET = "ultrafast";
-const VIDEO_BITRATE = "200k";
-const VIDEO_BUFSIZE = "256k";
+const VIDEO_BITRATE = "800k";
+const VIDEO_BUFSIZE = "1600k";
 const AUDIO_BITRATE = "48k";
 const GRID_GAP = 8;
 const SCREEN_SHARE_GAP = 8;
