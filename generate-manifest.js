@@ -70,6 +70,15 @@ function inferFromFilename(fileBaseName, trackId) {
   const beforeTrack =
     trackIndex >= 0 ? withoutExt.slice(0, trackIndex) : withoutExt;
 
+  const screenShareAudioSuffix = "-screen-share-audio";
+  if (beforeTrack.endsWith(screenShareAudioSuffix)) {
+    return {
+      participantIdentity:
+        beforeTrack.slice(0, -screenShareAudioSuffix.length) || "unknown",
+      source: "screen_share_audio",
+    };
+  }
+
   const screenShareSuffix = "-screen-share";
   if (beforeTrack.endsWith(screenShareSuffix)) {
     return {
@@ -107,6 +116,7 @@ function toSegment(track) {
     file: track.file,
     fileName: track.fileName,
     trackId: track.trackId,
+    source: track.source,
     offsetMs: track.offsetMs,
     durationMs: track.durationMs,
     startedAtNs: track.startedAtNs,
@@ -121,8 +131,10 @@ function buildParticipants(tracks) {
     const isCamera = track.kind === "video" && track.source === "camera";
     const isMicrophone = track.kind === "audio" && track.source === "microphone";
     const isScreenShare = track.kind === "video" && track.source === "screen_share";
+    const isScreenShareAudio =
+      track.kind === "audio" && track.source === "screen_share_audio";
 
-    if (!isCamera && !isMicrophone && !isScreenShare) {
+    if (!isCamera && !isMicrophone && !isScreenShare && !isScreenShareAudio) {
       continue;
     }
 
@@ -140,7 +152,7 @@ function buildParticipants(tracks) {
 
     if (isCamera) {
       participant.videoSegments.push(toSegment(track));
-    } else if (isMicrophone) {
+    } else if (isMicrophone || isScreenShareAudio) {
       participant.audioSegments.push(toSegment(track));
     } else {
       participant.screenShareSegments.push(toSegment(track));

@@ -54,6 +54,7 @@ function toSegment(track) {
     file: track.file,
     fileName: track.fileName,
     trackId: track.trackId,
+    source: track.source,
     offsetMs: track.offsetMs,
     durationMs: track.durationMs,
     startedAtNs: track.startedAtNs,
@@ -68,8 +69,10 @@ function buildParticipantsFromTracks(tracks) {
     const isCamera = track.kind === "video" && track.source === "camera";
     const isMicrophone = track.kind === "audio" && track.source === "microphone";
     const isScreenShare = track.kind === "video" && track.source === "screen_share";
+    const isScreenShareAudio =
+      track.kind === "audio" && track.source === "screen_share_audio";
 
-    if (!isCamera && !isMicrophone && !isScreenShare) {
+    if (!isCamera && !isMicrophone && !isScreenShare && !isScreenShareAudio) {
       continue;
     }
 
@@ -87,7 +90,7 @@ function buildParticipantsFromTracks(tracks) {
 
     if (isCamera) {
       participant.videoSegments.push(toSegment(track));
-    } else if (isMicrophone) {
+    } else if (isMicrophone || isScreenShareAudio) {
       participant.audioSegments.push(toSegment(track));
     } else {
       participant.screenShareSegments.push(toSegment(track));
@@ -663,6 +666,16 @@ function main(workdir) {
   const audioInputStart =
     videoInputStart + videoSegments.length + screenShareSegments.length;
 
+  console.log("[render-audio] segmentCount", audioSegments.length);
+
+  if (audioSegments.length > 0) {
+    filters.push(
+      `anullsrc=channel_layout=stereo:sample_rate=48000,` +
+        `atrim=0:${outputDurationSec},asetpts=PTS-STARTPTS[silence]`
+    );
+    audioLabels.push("silence");
+  }
+
   audioSegments.forEach((segment, index) => {
     const inputIndex = audioInputStart + index;
     const delayMs = Math.max(
@@ -671,8 +684,19 @@ function main(workdir) {
     );
     const label = `a${index}`;
 
+    console.log("[render-audio] input", {
+      index,
+      source: segment.source || "unknown",
+      trackId: segment.trackId || null,
+      file: segment.file,
+      offsetMs: segment.offsetMs,
+      durationMs: segment.durationMs,
+      delayMs,
+    });
+
     filters.push(
       `[${inputIndex}:a]` +
+        `aresample=async=1:first_pts=0,` +
         `asetpts=PTS-STARTPTS,` +
         `adelay=${delayMs}|${delayMs}` +
         `[${label}]`
@@ -691,6 +715,12 @@ function main(workdir) {
   ];
 
   if (audioLabels.length > 0) {
+    console.log("[render-audio] amix", {
+      inputs: ["silence", ...audioSegments.map((segment) => segment.file)],
+      labels: audioLabels,
+      outputDurationSec,
+    });
+
     filters.push(
       `${audioLabels.map((label) => `[${label}]`).join("")}` +
         `amix=inputs=${audioLabels.length}:duration=longest:normalize=0,` +

@@ -15,6 +15,8 @@ const WIDTH = 854;
 const HEIGHT = 480;
 const FPS = 8;
 const MAX_VIDEOS = 16;
+const MAX_SCREEN_SHARES = 2;
+const FRAME_DURATION_MS = Math.ceil(1000 / FPS);
 const FONT_FILE =
   process.env.FONT_FILE ||
   (process.platform === "win32"
@@ -26,6 +28,7 @@ const VIDEO_BITRATE = "200k";
 const VIDEO_BUFSIZE = "256k";
 const AUDIO_BITRATE = "48k";
 const GRID_GAP = 8;
+const SCREEN_SHARE_GAP = 8;
 const TILE_BACKGROUND = "2f2d38";
 const AVATAR_BACKGROUND = "5b5a66";
 const AVATAR_CIRCLE = "\u25CF";
@@ -54,6 +57,94 @@ function runFfmpeg(args) {
   }
 }
 
+function measureMediaDurationMs(localFile) {
+  const result = spawnSync(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      localFile,
+    ],
+    { encoding: "utf8" }
+  );
+
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      `Erro ao medir duracao com ffprobe: ${result.error?.message || result.stderr || "status desconhecido"}`
+    );
+  }
+
+  const durationSeconds = Number(String(result.stdout || "").trim());
+  if (!Number.isFinite(durationSeconds) || durationSeconds < 0) {
+    throw new Error(`Duracao invalida retornada pelo ffprobe: ${result.stdout}`);
+  }
+
+  return Math.round(durationSeconds * 1000);
+}
+
+function measureStreamDurationMs(localFile, streamSelector) {
+  const result = spawnSync(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      streamSelector,
+      "-show_entries",
+      "stream=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      localFile,
+    ],
+    { encoding: "utf8" }
+  );
+
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      `Erro ao medir stream ${streamSelector} com ffprobe: ${
+        result.error?.message || result.stderr || "status desconhecido"
+      }`
+    );
+  }
+
+  const durationSeconds = Number(String(result.stdout || "").trim());
+  if (!Number.isFinite(durationSeconds) || durationSeconds < 0) {
+    throw new Error(
+      `Duracao invalida da stream ${streamSelector} retornada pelo ffprobe: ${result.stdout}`
+    );
+  }
+
+  return Math.round(durationSeconds * 1000);
+}
+
+function validateMediaDuration(localFile, expectedDurationMs, label) {
+  const actualDurationMs = measureMediaDurationMs(localFile);
+  const differenceMs = Math.abs(actualDurationMs - expectedDurationMs);
+  const diagnostic = {
+    label,
+    file: localFile,
+    expectedDurationMs,
+    actualDurationMs,
+    differenceMs,
+    toleranceMs: FRAME_DURATION_MS,
+  };
+
+  console.log("[render-duration]", diagnostic);
+
+  if (differenceMs > FRAME_DURATION_MS) {
+    throw new Error(
+      `Duracao invalida em ${label}: esperado ${expectedDurationMs}ms, ` +
+        `obtido ${actualDurationMs}ms, diferenca ${differenceMs}ms`
+    );
+  }
+
+  return actualDurationMs;
+}
+
 function assertFfmpegAvailable() {
   const result = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" });
 
@@ -71,6 +162,7 @@ function toSegment(track) {
     file: track.file,
     fileName: track.fileName,
     trackId: track.trackId,
+    source: track.source,
     offsetMs: track.offsetMs,
     durationMs: track.durationMs,
     startedAtNs: track.startedAtNs,
@@ -86,6 +178,47 @@ function overlaps(startMs, endMs, segment) {
   return segment.offsetMs < endMs && segmentEndMs(segment) > startMs;
 }
 
+function compareScreenShareSegments(a, b) {
+  if (a.offsetMs !== b.offsetMs) return a.offsetMs - b.offsetMs;
+
+  const identityComparison = String(a.participantIdentity || "").localeCompare(
+    String(b.participantIdentity || "")
+  );
+  if (identityComparison !== 0) return identityComparison;
+
+  return String(a.trackId || "").localeCompare(String(b.trackId || ""));
+}
+
+function getScreenShareTiles(count) {
+  if (count <= 1) {
+    return [{ x: 0, y: 0, w: WIDTH, h: HEIGHT }];
+  }
+
+  const tileWidth = Math.floor((WIDTH - SCREEN_SHARE_GAP) / 2);
+  return [
+    { x: 0, y: 0, w: tileWidth, h: HEIGHT },
+    { x: tileWidth + SCREEN_SHARE_GAP, y: 0, w: tileWidth, h: HEIGHT },
+  ];
+}
+
+function selectScreenShareSegments(segments) {
+  const ordered = [...segments].sort(compareScreenShareSegments);
+  return {
+    selected: ordered.slice(0, MAX_SCREEN_SHARES),
+    ignored: ordered.slice(MAX_SCREEN_SHARES),
+  };
+}
+
+function timelineMsToFrame(valueMs) {
+  return Math.round((valueMs * FPS) / 1000);
+}
+
+function getSceneRenderDurationMs(scene) {
+  const startFrame = timelineMsToFrame(scene.startMs);
+  const endFrame = timelineMsToFrame(scene.endMs);
+  return Math.max(0, (endFrame - startFrame) * FRAME_DURATION_MS);
+}
+
 function buildParticipantsFromTracks(tracks) {
   const byIdentity = new Map();
 
@@ -93,8 +226,10 @@ function buildParticipantsFromTracks(tracks) {
     const isCamera = track.kind === "video" && track.source === "camera";
     const isMicrophone = track.kind === "audio" && track.source === "microphone";
     const isScreenShare = track.kind === "video" && track.source === "screen_share";
+    const isScreenShareAudio =
+      track.kind === "audio" && track.source === "screen_share_audio";
 
-    if (!isCamera && !isMicrophone && !isScreenShare) {
+    if (!isCamera && !isMicrophone && !isScreenShare && !isScreenShareAudio) {
       continue;
     }
 
@@ -112,7 +247,7 @@ function buildParticipantsFromTracks(tracks) {
 
     if (isCamera) {
       participant.videoSegments.push(toSegment(track));
-    } else if (isMicrophone) {
+    } else if (isMicrophone || isScreenShareAudio) {
       participant.audioSegments.push(toSegment(track));
     } else {
       participant.screenShareSegments.push(toSegment(track));
@@ -574,9 +709,9 @@ function createScenes(participants, screenShareSegments, durationMs) {
       continue;
     }
 
-    const activeScreens = screenShareSegments.filter((segment) =>
-      overlaps(startMs, endMs, segment)
-    );
+    const activeScreens = screenShareSegments
+      .filter((segment) => overlaps(startMs, endMs, segment))
+      .sort(compareScreenShareSegments);
     const participantsInScene = createSceneParticipants(participants, startMs, endMs);
     const kind = activeScreens.length > 0 ? "screen" : "grid";
     const key =
@@ -629,11 +764,14 @@ function renderIntroPart(
     ...encodeVideoArgs(outputFile),
   ]);
 
+  validateMediaDuration(outputFile, INTRO_SECONDS * 1000, "intro");
+
   return outputFile;
 }
 
 function renderGridScene(workdir, sceneDir, scene, sceneIndex, videoSegments) {
-  const durationSec = seconds(scene.endMs - scene.startMs);
+  const renderDurationMs = getSceneRenderDurationMs(scene);
+  const durationSec = seconds(renderDurationMs);
   const { cols, rows } = getGrid(Math.max(1, scene.participants.length));
   const gap = GRID_GAP;
   const cellW = Math.floor((WIDTH - gap * (cols + 1)) / cols);
@@ -711,21 +849,77 @@ function renderGridScene(workdir, sceneDir, scene, sceneIndex, videoSegments) {
     ...encodeVideoArgs(outputFile),
   ]);
 
+  validateMediaDuration(
+    outputFile,
+    renderDurationMs,
+    `scene-${sceneIndex + 1}-grid`
+  );
+
   return outputFile;
 }
 
 function renderScreenScene(workdir, sceneDir, scene, sceneIndex) {
-  const durationSec = seconds(scene.endMs - scene.startMs);
-  const segment = scene.screenShareSegments[0];
-  const startMs = Math.max(scene.startMs, segment.offsetMs);
-  const sourceStartSec = seconds(startMs - segment.offsetMs);
+  const renderDurationMs = getSceneRenderDurationMs(scene);
+  const durationSec = seconds(renderDurationMs);
+  const { selected: selectedSegments, ignored: ignoredSegments } =
+    selectScreenShareSegments(scene.screenShareSegments);
+  const orderedSegments = [...selectedSegments, ...ignoredSegments];
+  const tiles = getScreenShareTiles(selectedSegments.length);
   const filters = [
-    `[0:v]trim=start=${sourceStartSec}:duration=${durationSec},` +
-      `setpts=PTS-STARTPTS,` +
-      `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
-      `setsar=1[ss]`,
-    `[ss]pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black[vout]`,
+    `color=c=black:s=${WIDTH}x${HEIGHT}:r=${FPS}:d=${durationSec}[sharebase]`,
   ];
+  let current = "sharebase";
+
+  console.log("[render-screen] scene", {
+    sceneIndex: sceneIndex + 1,
+    startMs: scene.startMs,
+    endMs: scene.endMs,
+    manifestDurationMs: scene.endMs - scene.startMs,
+    renderDurationMs,
+    activeShares: orderedSegments.map((segment) => ({
+      participantIdentity: segment.participantIdentity || null,
+      trackId: segment.trackId || null,
+      offsetMs: segment.offsetMs,
+      durationMs: segment.durationMs,
+    })),
+    selectedTrackIds: selectedSegments.map((segment) => segment.trackId || null),
+    ignoredTrackIds: ignoredSegments.map((segment) => segment.trackId || null),
+  });
+
+  selectedSegments.forEach((segment, index) => {
+    const tile = tiles[index];
+    const startMs = Math.max(scene.startMs, segment.offsetMs);
+    const sourceStartSec = seconds(startMs - segment.offsetMs);
+    const shareLabel = `share${index}`;
+    const outputLabel = `sharetmp${index}`;
+
+    console.log("[render-screen] input", {
+      index,
+      participantIdentity: segment.participantIdentity || null,
+      trackId: segment.trackId || null,
+      file: segment.file,
+      sourceStartSec,
+      expectedDurationMs: renderDurationMs,
+      tile,
+    });
+
+    filters.push(
+      `[${index}:v]trim=start=${sourceStartSec}:duration=${durationSec},` +
+        `setpts=PTS-STARTPTS,fps=${FPS},` +
+        `tpad=stop_mode=clone:stop_duration=${durationSec},` +
+        `trim=duration=${durationSec},setpts=PTS-STARTPTS,` +
+        `scale=${tile.w}:${tile.h}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
+        `setsar=1,pad=${tile.w}:${tile.h}:(ow-iw)/2:(oh-ih)/2:color=black` +
+        `[${shareLabel}]`
+    );
+    filters.push(
+      `[${current}][${shareLabel}]overlay=x=${tile.x}:y=${tile.y}:eof_action=pass` +
+        `[${outputLabel}]`
+    );
+    current = outputLabel;
+  });
+
+  filters.push(`[${current}]trim=duration=${durationSec},setpts=PTS-STARTPTS[vout]`);
   const filterScript = makeFilterScript(sceneDir, `scene-${sceneIndex}`, filters);
   const outputFile = path.join(
     sceneDir,
@@ -734,8 +928,7 @@ function renderScreenScene(workdir, sceneDir, scene, sceneIndex) {
 
   runFfmpeg([
     "-y",
-    "-i",
-    absFile(workdir, segment),
+    ...selectedSegments.flatMap((segment) => ["-i", absFile(workdir, segment)]),
     "-filter_complex_script",
     filterScript,
     "-map",
@@ -745,11 +938,33 @@ function renderScreenScene(workdir, sceneDir, scene, sceneIndex) {
     ...encodeVideoArgs(outputFile),
   ]);
 
+  validateMediaDuration(
+    outputFile,
+    renderDurationMs,
+    `scene-${sceneIndex + 1}-screen`
+  );
+
   return outputFile;
 }
 
 function renderAudio(workdir, sceneDir, audioSegments, outputDurationSec) {
   const outputFile = path.join(sceneDir, "audio.m4a");
+  console.log(
+    "[render-audio] segments",
+    JSON.stringify(
+      audioSegments.map((segment) => ({
+        source: segment.source || "unknown",
+        trackId: segment.trackId || null,
+        file: segment.file,
+        startedAtNs: segment.startedAtNs || null,
+        endedAtNs: segment.endedAtNs || null,
+        offsetMs: segment.offsetMs,
+        durationMs: segment.durationMs,
+      }))
+    )
+  );
+  console.log("[render-audio] segmentCount", audioSegments.length);
+
   const filters = [
     `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:${outputDurationSec},asetpts=PTS-STARTPTS[silence]`,
   ];
@@ -761,9 +976,20 @@ function renderAudio(workdir, sceneDir, audioSegments, outputDurationSec) {
     const delayMs = Math.max(0, Math.round(segment.offsetMs + INTRO_SECONDS * 1000));
     const label = `a${index}`;
 
+    console.log("[render-audio] input", {
+      index,
+      source: segment.source || "unknown",
+      trackId: segment.trackId || null,
+      file: segment.file,
+      offsetMs: segment.offsetMs,
+      durationMs: segment.durationMs,
+      delayMs,
+    });
+
     inputs.push("-i", absFile(workdir, segment));
     filters.push(
-      `[${inputIndex}:a]asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[${label}]`
+      `[${inputIndex}:a]aresample=async=1:first_pts=0,` +
+        `asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[${label}]`
     );
     labels.push(label);
   });
@@ -773,6 +999,12 @@ function renderAudio(workdir, sceneDir, audioSegments, outputDurationSec) {
       `amix=inputs=${labels.length}:duration=longest:normalize=0,` +
       `atrim=0:${outputDurationSec},asetpts=PTS-STARTPTS[aout]`
   );
+
+  console.log("[render-audio] amix", {
+    inputs: ["silence", ...audioSegments.map((segment) => segment.file)],
+    labels,
+    outputDurationSec,
+  });
 
   const filterScript = makeFilterScript(sceneDir, "audio", filters);
 
@@ -790,10 +1022,17 @@ function renderAudio(workdir, sceneDir, audioSegments, outputDurationSec) {
     outputFile,
   ]);
 
+  const outputDurationMs = measureMediaDurationMs(outputFile);
+  console.log("[render-audio] output", {
+    file: outputFile,
+    outputDurationMs,
+    requestedDurationMs: Math.round(outputDurationSec * 1000),
+  });
+
   return outputFile;
 }
 
-function concatVideoParts(sceneDir, parts) {
+function concatVideoParts(sceneDir, parts, expectedDurationMs) {
   const listPath = path.join(sceneDir, CONCAT_FILE);
   const outputFile = path.join(sceneDir, "video-only.mp4");
 
@@ -816,10 +1055,12 @@ function concatVideoParts(sceneDir, parts) {
     outputFile,
   ]);
 
+  validateMediaDuration(outputFile, expectedDurationMs, "video-concatenado");
+
   return outputFile;
 }
 
-function muxFinal(videoFile, audioFile, finalOutput) {
+function muxFinal(videoFile, audioFile, finalOutput, expectedDurationMs) {
   runFfmpeg([
     "-y",
     "-i",
@@ -837,6 +1078,34 @@ function muxFinal(videoFile, audioFile, finalOutput) {
     "-shortest",
     finalOutput,
   ]);
+
+  const videoDurationMs = measureStreamDurationMs(finalOutput, "v:0");
+  const audioDurationMs = measureStreamDurationMs(finalOutput, "a:0");
+  const videoDifferenceMs = Math.abs(videoDurationMs - expectedDurationMs);
+  const audioDifferenceMs = Math.abs(audioDurationMs - expectedDurationMs);
+  const avDifferenceMs = Math.abs(videoDurationMs - audioDurationMs);
+
+  console.log("[render-final] durations", {
+    file: finalOutput,
+    expectedDurationMs,
+    videoDurationMs,
+    audioDurationMs,
+    videoDifferenceMs,
+    audioDifferenceMs,
+    avDifferenceMs,
+    toleranceMs: FRAME_DURATION_MS,
+  });
+
+  if (
+    videoDifferenceMs > FRAME_DURATION_MS ||
+    audioDifferenceMs > FRAME_DURATION_MS ||
+    avDifferenceMs > FRAME_DURATION_MS
+  ) {
+    throw new Error(
+      `Duracao final invalida: esperado ${expectedDurationMs}ms, ` +
+        `video ${videoDurationMs}ms, audio ${audioDurationMs}ms`
+    );
+  }
 }
 
 function main(workdir, options = {}) {
@@ -884,8 +1153,13 @@ function main(workdir, options = {}) {
     (participant) => participant.audioSegments || []
   );
   const screenShareSegments = participants
-    .flatMap((participant) => participant.screenShareSegments || [])
-    .sort((a, b) => a.offsetMs - b.offsetMs);
+    .flatMap((participant) =>
+      (participant.screenShareSegments || []).map((segment) => ({
+        ...segment,
+        participantIdentity: participant.participantIdentity,
+      }))
+    )
+    .sort(compareScreenShareSegments);
 
   const hasUsefulMedia =
     videoSegments.length > 0 ||
@@ -916,10 +1190,23 @@ function main(workdir, options = {}) {
   parts.push(renderIntroPart(sceneDir, manifest));
 
   scenes.forEach((scene, index) => {
+    const renderDurationMs = getSceneRenderDurationMs(scene);
     const label = `${String(index + 1).padStart(4, "0")} ${scene.kind} ${seconds(
       scene.endMs - scene.startMs
     ).toFixed(3)}s`;
     console.log(`Gerando cena ${label}...`);
+
+    if (renderDurationMs === 0) {
+      console.log("[render-duration] scene skipped below frame resolution", {
+        sceneIndex: index + 1,
+        kind: scene.kind,
+        startMs: scene.startMs,
+        endMs: scene.endMs,
+        manifestDurationMs: scene.endMs - scene.startMs,
+        fps: FPS,
+      });
+      return;
+    }
 
     if (scene.kind === "screen") {
       parts.push(renderScreenScene(workdir, sceneDir, scene, index));
@@ -929,10 +1216,13 @@ function main(workdir, options = {}) {
   });
 
   console.log("Concatenando cenas...");
-  const videoFile = concatVideoParts(sceneDir, parts);
+  const expectedOutputDurationMs = Math.round(outputDurationSec * 1000);
+  const expectedVideoDurationMs =
+    INTRO_SECONDS * 1000 + timelineMsToFrame(manifest.durationMs) * FRAME_DURATION_MS;
+  const videoFile = concatVideoParts(sceneDir, parts, expectedVideoDurationMs);
 
   console.log("Muxando audio final...");
-  muxFinal(videoFile, audioFile, finalOutput);
+  muxFinal(videoFile, audioFile, finalOutput, expectedOutputDurationMs);
 
   console.log("");
   console.log("Video gerado:");
@@ -946,6 +1236,14 @@ if (require.main === module) {
 }
 
 module.exports = {
+  __test: {
+    compareScreenShareSegments,
+    createScenes,
+    getSceneRenderDurationMs,
+    getScreenShareTiles,
+    selectScreenShareSegments,
+    timelineMsToFrame,
+  },
   getFinalDynamicPath,
   main,
 };
