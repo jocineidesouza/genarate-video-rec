@@ -11,8 +11,8 @@ const {
 } = require("./src/paths");
 const { resolveVideoEdition } = require("./src/video-naming");
 
-const WIDTH = 854;
-const HEIGHT = 480;
+const WIDTH = 1280;
+const HEIGHT = 720;
 const FPS = 8;
 const MAX_VIDEOS = 16;
 const MAX_SCREEN_SHARES = 2;
@@ -24,8 +24,20 @@ const FONT_FILE =
     : "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
 const INTRO_SECONDS = 2;
 const VIDEO_PRESET = "ultrafast";
-const VIDEO_BITRATE = "800k";
-const VIDEO_BUFSIZE = "1600k";
+const VIDEO_QUALITY_PROFILES = Object.freeze({
+  intro: Object.freeze({ name: "intro", bitrate: "400k", bufsize: "800k" }),
+  grid: Object.freeze({ name: "grid", bitrate: "450k", bufsize: "900k" }),
+  screenSingle: Object.freeze({
+    name: "screen-single",
+    bitrate: "1200k",
+    bufsize: "2400k",
+  }),
+  screenMultiple: Object.freeze({
+    name: "screen-multiple",
+    bitrate: "1600k",
+    bufsize: "3200k",
+  }),
+});
 const AUDIO_BITRATE = "48k";
 const GRID_GAP = 8;
 const SCREEN_SHARE_GAP = 8;
@@ -143,6 +155,82 @@ function validateMediaDuration(localFile, expectedDurationMs, label) {
   }
 
   return actualDurationMs;
+}
+
+function parseFrameRate(value) {
+  const [numerator, denominator] = String(value || "").split("/").map(Number);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+    return NaN;
+  }
+
+  return numerator / denominator;
+}
+
+function probeVideoStream(localFile) {
+  const result = spawnSync(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=codec_name,profile,level,width,height,pix_fmt,r_frame_rate",
+      "-of",
+      "json",
+      localFile,
+    ],
+    { encoding: "utf8" }
+  );
+
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      `Erro ao inspecionar video com ffprobe: ${
+        result.error?.message || result.stderr || "status desconhecido"
+      }`
+    );
+  }
+
+  const stream = JSON.parse(String(result.stdout || "{}")).streams?.[0];
+  if (!stream) {
+    throw new Error(`Stream de video ausente: ${localFile}`);
+  }
+
+  return stream;
+}
+
+function validateVideoFormat(localFile, label) {
+  const stream = probeVideoStream(localFile);
+  const frameRate = parseFrameRate(stream.r_frame_rate);
+  const diagnostic = {
+    label,
+    file: localFile,
+    codec: stream.codec_name,
+    profile: stream.profile,
+    level: stream.level,
+    width: stream.width,
+    height: stream.height,
+    pixFmt: stream.pix_fmt,
+    frameRate: stream.r_frame_rate,
+  };
+
+  console.log("[render-video-format]", diagnostic);
+
+  if (
+    stream.codec_name !== "h264" ||
+    stream.profile !== "High" ||
+    stream.level !== 31 ||
+    stream.width !== WIDTH ||
+    stream.height !== HEIGHT ||
+    stream.pix_fmt !== "yuv420p" ||
+    Math.abs(frameRate - FPS) > 0.001
+  ) {
+    throw new Error(
+      `Formato de video invalido em ${label}: ${JSON.stringify(diagnostic)}`
+    );
+  }
+
+  return diagnostic;
 }
 
 function assertFfmpegAvailable() {
@@ -512,7 +600,27 @@ function makeFilterScript(dir, name, filters) {
   return filePath;
 }
 
-function encodeVideoArgs(outputFile) {
+function getScreenVideoQualityProfile(selectedShareCount) {
+  return selectedShareCount <= 1
+    ? VIDEO_QUALITY_PROFILES.screenSingle
+    : VIDEO_QUALITY_PROFILES.screenMultiple;
+}
+
+function getVideoQualityProfile(sceneKind, selectedShareCount = 0) {
+  if (sceneKind === "intro") return VIDEO_QUALITY_PROFILES.intro;
+  if (sceneKind === "grid") return VIDEO_QUALITY_PROFILES.grid;
+  if (sceneKind === "screen") {
+    return getScreenVideoQualityProfile(selectedShareCount);
+  }
+
+  throw new Error(`Tipo de cena sem perfil de qualidade: ${sceneKind}`);
+}
+
+function encodeVideoArgs(outputFile, qualityProfile) {
+  if (!qualityProfile) {
+    throw new Error("Perfil de qualidade de video obrigatorio");
+  }
+
   return [
     "-r",
     String(FPS),
@@ -520,12 +628,24 @@ function encodeVideoArgs(outputFile) {
     "libx264",
     "-preset",
     VIDEO_PRESET,
+    "-profile:v",
+    "high",
+    "-level:v",
+    "3.1",
+    "-x264-params",
+    "cabac=1:8x8dct=1",
+    "-g",
+    String(FPS * 2),
+    "-keyint_min",
+    String(FPS * 2),
+    "-sc_threshold",
+    "0",
     "-b:v",
-    VIDEO_BITRATE,
+    qualityProfile.bitrate,
     "-maxrate",
-    VIDEO_BITRATE,
+    qualityProfile.bitrate,
     "-bufsize",
-    VIDEO_BUFSIZE,
+    qualityProfile.bufsize,
     "-pix_fmt",
     "yuv420p",
     "-an",
@@ -761,10 +881,11 @@ function renderIntroPart(
     "[vout]",
     "-t",
     String(INTRO_SECONDS),
-    ...encodeVideoArgs(outputFile),
+    ...encodeVideoArgs(outputFile, getVideoQualityProfile("intro")),
   ]);
 
   validateMediaDuration(outputFile, INTRO_SECONDS * 1000, "intro");
+  validateVideoFormat(outputFile, "intro");
 
   return outputFile;
 }
@@ -846,7 +967,7 @@ function renderGridScene(workdir, sceneDir, scene, sceneIndex, videoSegments) {
     "[vout]",
     "-t",
     String(durationSec),
-    ...encodeVideoArgs(outputFile),
+    ...encodeVideoArgs(outputFile, getVideoQualityProfile("grid")),
   ]);
 
   validateMediaDuration(
@@ -854,6 +975,7 @@ function renderGridScene(workdir, sceneDir, scene, sceneIndex, videoSegments) {
     renderDurationMs,
     `scene-${sceneIndex + 1}-grid`
   );
+  validateVideoFormat(outputFile, `scene-${sceneIndex + 1}-grid`);
 
   return outputFile;
 }
@@ -935,7 +1057,10 @@ function renderScreenScene(workdir, sceneDir, scene, sceneIndex) {
     "[vout]",
     "-t",
     String(durationSec),
-    ...encodeVideoArgs(outputFile),
+    ...encodeVideoArgs(
+      outputFile,
+      getVideoQualityProfile("screen", selectedSegments.length)
+    ),
   ]);
 
   validateMediaDuration(
@@ -943,6 +1068,7 @@ function renderScreenScene(workdir, sceneDir, scene, sceneIndex) {
     renderDurationMs,
     `scene-${sceneIndex + 1}-screen`
   );
+  validateVideoFormat(outputFile, `scene-${sceneIndex + 1}-screen`);
 
   return outputFile;
 }
@@ -1056,6 +1182,7 @@ function concatVideoParts(sceneDir, parts, expectedDurationMs) {
   ]);
 
   validateMediaDuration(outputFile, expectedDurationMs, "video-concatenado");
+  validateVideoFormat(outputFile, "video-concatenado");
 
   return outputFile;
 }
@@ -1084,6 +1211,7 @@ function muxFinal(videoFile, audioFile, finalOutput, expectedDurationMs) {
   const videoDifferenceMs = Math.abs(videoDurationMs - expectedDurationMs);
   const audioDifferenceMs = Math.abs(audioDurationMs - expectedDurationMs);
   const avDifferenceMs = Math.abs(videoDurationMs - audioDurationMs);
+  validateVideoFormat(finalOutput, "video-final");
 
   console.log("[render-final] durations", {
     file: finalOutput,
@@ -1180,7 +1308,7 @@ function main(workdir, options = {}) {
   const parts = [];
 
   console.log(`Cenas: ${scenes.length}`);
-  console.log(`Video bitrate: ${VIDEO_BITRATE}`);
+  console.log("Perfis de video:", VIDEO_QUALITY_PROFILES);
   console.log(`Audio bitrate: ${AUDIO_BITRATE}`);
 
   console.log("Gerando audio final...");
@@ -1241,6 +1369,8 @@ module.exports = {
     createScenes,
     getSceneRenderDurationMs,
     getScreenShareTiles,
+    getScreenVideoQualityProfile,
+    getVideoQualityProfile,
     selectScreenShareSegments,
     timelineMsToFrame,
   },

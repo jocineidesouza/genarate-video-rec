@@ -10,6 +10,7 @@ const {
   getScreenShareTiles,
   selectScreenShareSegments,
   timelineMsToFrame,
+  getVideoQualityProfile,
 } = __test;
 
 function share(trackId, participantIdentity, offsetMs, durationMs) {
@@ -22,15 +23,43 @@ function share(trackId, participantIdentity, offsetMs, durationMs) {
 }
 
 test("getScreenShareTiles uses full screen for one share", () => {
-  assert.deepEqual(getScreenShareTiles(1), [{ x: 0, y: 0, w: 854, h: 480 }]);
+  assert.deepEqual(getScreenShareTiles(1), [{ x: 0, y: 0, w: 1280, h: 720 }]);
 });
 
-test("getScreenShareTiles uses two 423px columns with an 8px gap", () => {
+test("getScreenShareTiles uses two 636px columns with an 8px gap", () => {
   assert.deepEqual(getScreenShareTiles(2), [
-    { x: 0, y: 0, w: 423, h: 480 },
-    { x: 431, y: 0, w: 423, h: 480 },
+    { x: 0, y: 0, w: 636, h: 720 },
+    { x: 644, y: 0, w: 636, h: 720 },
   ]);
   assert.equal(getScreenShareTiles(3).length, 2);
+});
+
+test("selects the configured video quality profile for every scene type", () => {
+  assert.deepEqual(getVideoQualityProfile("intro"), {
+    name: "intro",
+    bitrate: "400k",
+    bufsize: "800k",
+  });
+  assert.deepEqual(getVideoQualityProfile("grid"), {
+    name: "grid",
+    bitrate: "450k",
+    bufsize: "900k",
+  });
+  assert.deepEqual(getVideoQualityProfile("screen", 1), {
+    name: "screen-single",
+    bitrate: "1200k",
+    bufsize: "2400k",
+  });
+  assert.deepEqual(getVideoQualityProfile("screen", 2), {
+    name: "screen-multiple",
+    bitrate: "1600k",
+    bufsize: "3200k",
+  });
+  assert.deepEqual(getVideoQualityProfile("screen", 3), {
+    name: "screen-multiple",
+    bitrate: "1600k",
+    bufsize: "3200k",
+  });
 });
 
 test("compareScreenShareSegments provides stable ordering", () => {

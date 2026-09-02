@@ -10,14 +10,16 @@ const {
   resolveWorkdirRelative,
 } = require("./src/paths");
 
-const WIDTH = 854;
-const HEIGHT = 480;
-const FPS = 10;
+const WIDTH = 1280;
+const HEIGHT = 720;
+const FPS = 8;
 const MAX_VIDEOS = 16;
 const FONT_FILE = "C\\:/Windows/Fonts/arial.ttf";
 const INTRO_SECONDS = 2;
 const VIDEO_PRESET = "ultrafast";
-const VIDEO_CRF = "35";
+const VIDEO_CRF = "28";
+const VIDEO_MAXRATE = "1200k";
+const VIDEO_BUFSIZE = "2400k";
 const AUDIO_BITRATE = "64k";
 const GRID_GAP = 8;
 const TILE_BACKGROUND = "2f2d38";
@@ -25,6 +27,37 @@ const AVATAR_BACKGROUND = "5b5a66";
 const AVATAR_CIRCLE = "\u25CF";
 const STATIC_GRID_FILE = "grid-background.png";
 const STATIC_LABELS_FILE = "grid-labels.png";
+
+function fallbackVideoEncodeArgs() {
+  return [
+    "-r",
+    String(FPS),
+    "-c:v",
+    "libx264",
+    "-preset",
+    VIDEO_PRESET,
+    "-profile:v",
+    "high",
+    "-level:v",
+    "3.1",
+    "-x264-params",
+    "cabac=1:8x8dct=1",
+    "-g",
+    String(FPS * 2),
+    "-keyint_min",
+    String(FPS * 2),
+    "-sc_threshold",
+    "0",
+    "-crf",
+    VIDEO_CRF,
+    "-maxrate",
+    VIDEO_MAXRATE,
+    "-bufsize",
+    VIDEO_BUFSIZE,
+    "-pix_fmt",
+    "yuv420p",
+  ];
+}
 
 function getGrid(count) {
   if (count <= 1) return { cols: 1, rows: 1 };
@@ -337,17 +370,17 @@ function renderIntroOnly(workdir, manifest, finalOutput) {
   );
   addIntroFilters(filters, manifest, "introbase");
 
-  const filterScript = makeFilterScript(outputDir, "intro-only", filters);
-
   runFfmpeg([
     "-y",
-    "-filter_complex_script",
-    filterScript,
+    "-filter_complex",
+    filters.join(";"),
     "-map",
     "[vout]",
     "-t",
     String(INTRO_SECONDS),
-    ...encodeVideoArgs(finalOutput),
+    ...fallbackVideoEncodeArgs(),
+    "-an",
+    finalOutput,
   ]);
 
   return finalOutput;
@@ -746,16 +779,7 @@ function main(workdir) {
   args.push(
     "-t",
     String(outputDurationSec),
-    "-r",
-    String(FPS),
-    "-c:v",
-    "libx264",
-    "-preset",
-    VIDEO_PRESET,
-    "-crf",
-    VIDEO_CRF,
-    "-pix_fmt",
-    "yuv420p",
+    ...fallbackVideoEncodeArgs(),
     "-c:a",
     "aac",
     "-b:a",
