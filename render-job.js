@@ -97,11 +97,11 @@ function resolveRecordingStorage(indexData, recId) {
 
   const manifestSegments = `${storagePrefix}manifest.json`.split("/").filter(Boolean);
   const [vertical, slug, feature, artifactType, entityId, artifactId, fileName] = manifestSegments;
-  const callSessionId = normalizeText(indexData.callSessionId || indexData.call_session_id);
+  const callId = normalizeText(indexData.callId);
   if (
     feature !== "call" ||
     artifactType !== "recordings" ||
-    entityId !== callSessionId ||
+    entityId !== callId ||
     artifactId !== recId ||
     fileName !== "manifest.json"
   ) {
@@ -142,7 +142,7 @@ async function uploadFinalVideo(bucket, localFile, finalStoragePath, { recId, in
   }
 
   const videoSizeBytes = fs.statSync(localFile).size;
-  const callSessionId = normalizeText(indexData?.callSessionId || indexData?.call_session_id);
+  const callId = normalizeText(indexData?.callId);
   const roomId = normalizeText(indexData?.roomId || indexData?.room_id);
   await bucket.upload(localFile, {
     destination: finalStoragePath,
@@ -154,11 +154,11 @@ async function uploadFinalVideo(bucket, localFile, finalStoragePath, { recId, in
         slug: normalizeText(indexData?.slug),
         feature: "call",
         artifactType: "recordings",
-        entityId: callSessionId,
+        entityId: callId,
         artifactId: recId,
         producer: "recording-render-job",
         objectRole: "rendered-video",
-        callSessionId,
+        callId,
         recordingId: recId,
         ...(roomId ? { roomId } : {}),
       },
